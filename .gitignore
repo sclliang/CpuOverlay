@@ -1,0 +1,5 @@
+/build/
+/artifacts/
+/package/
+/.vs/
+*.user
