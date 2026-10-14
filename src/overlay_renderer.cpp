@@ -2,26 +2,44 @@
 #include <cmath>
 #include <cwchar>
 #include <vector>
+#include <algorithm>
+#include <string>
 
 namespace {
-void DrawTextPath(Gdiplus::Graphics& graphics, const wchar_t* text, float x, float y,
-                  float emSize, const Gdiplus::Color& color, bool mono = false) {
-    Gdiplus::FontFamily family(mono ? L"Consolas" : L"Segoe UI");
-    const auto* chosen = family.IsAvailable() ? &family : Gdiplus::FontFamily::GenericSansSerif();
-    Gdiplus::GraphicsPath path;
-    Gdiplus::StringFormat format(Gdiplus::StringFormat::GenericTypographic());
-    path.AddString(text, -1, chosen, Gdiplus::FontStyleBold, emSize, Gdiplus::PointF(x, y), &format);
-    Gdiplus::Pen edge(Gdiplus::Color(230, 15, 23, 35), 2.5f);
-    edge.SetLineJoin(Gdiplus::LineJoinRound);
-    graphics.DrawPath(&edge, &path);
-    Gdiplus::SolidBrush fill(color);
-    graphics.FillPath(&fill, &path);
+std::wstring Value(const std::optional<double>& value, int decimals, const wchar_t* unit) {
+    if (!value) return std::wstring(L"--") + unit;
+    wchar_t buffer[64]{};
+    swprintf_s(buffer, L"%.*f%s", decimals, *value, unit);
+    return buffer;
 }
 }
 
-std::unique_ptr<Gdiplus::Bitmap> RenderOverlay(const CpuSample& sample, float scale) {
-    const int width = static_cast<int>(std::ceil(446.0f * scale));
-    const int height = static_cast<int>(std::ceil(44.0f * scale));
+std::wstring FormatOverlayText(const CpuSample& sample) {
+    return L"处理器:" + Value(sample.usagePercent, 1, L"%") +
+        L" | 频率:" + Value(sample.frequencyGhz, 2, L"GHz") +
+        L" | 温度:" + Value(sample.hardware.temperatureC, 0, L"℃") +
+        L" | 功耗:" + Value(sample.hardware.packageWatts, 1, L"W") +
+        L" | 内存:" + Value(sample.memoryPercent, 1, L"%") +
+        L" | 显卡:" + Value(sample.gpuPercent, 1, L"%");
+}
+
+std::unique_ptr<Gdiplus::Bitmap> RenderOverlay(const CpuSample& sample, float scale, int maxWidth) {
+    if (!std::isfinite(scale) || scale <= 0) return nullptr;
+    Gdiplus::FontFamily family(L"Microsoft YaHei UI");
+    Gdiplus::FontFamily fallback(L"Microsoft YaHei");
+    const auto* chosen = family.IsAvailable() ? &family : (fallback.IsAvailable() ? &fallback : Gdiplus::FontFamily::GenericSansSerif());
+    Gdiplus::GraphicsPath path;
+    Gdiplus::StringFormat format(Gdiplus::StringFormat::GenericTypographic());
+    const auto line = FormatOverlayText(sample);
+    if (path.AddString(line.c_str(), -1, chosen, Gdiplus::FontStyleBold, 24, Gdiplus::PointF(8, 7), &format) != Gdiplus::Ok)
+        return nullptr;
+    Gdiplus::RectF bounds;
+    path.GetBounds(&bounds);
+    const float logicalWidth = bounds.GetRight() + 8;
+    const float logicalHeight = std::max(44.0f, bounds.GetBottom() + 8);
+    if (maxWidth > 0) scale = std::min(scale, static_cast<float>(maxWidth) / logicalWidth);
+    const int width = static_cast<int>(std::ceil(logicalWidth * scale));
+    const int height = static_cast<int>(std::ceil(logicalHeight * scale));
     auto bitmap = std::make_unique<Gdiplus::Bitmap>(width, height, PixelFormat32bppPARGB);
     if (bitmap->GetLastStatus() != Gdiplus::Ok) return nullptr;
     Gdiplus::Graphics graphics(bitmap.get());
@@ -29,13 +47,11 @@ std::unique_ptr<Gdiplus::Bitmap> RenderOverlay(const CpuSample& sample, float sc
     graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
     graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
     graphics.ScaleTransform(scale, scale);
-    wchar_t usage[32] = L"   --";
-    wchar_t frequency[32] = L"   --";
-    if (sample.usagePercent) swprintf_s(usage, L"%5.1f", *sample.usagePercent);
-    if (sample.frequencyGhz) swprintf_s(frequency, L"%5.2f", *sample.frequencyGhz);
-    wchar_t line[96]{};
-    swprintf_s(line, L"CPU %s%% | FREQ %s GHz", usage, frequency);
-    DrawTextPath(graphics, line, 8, 7, 24, Gdiplus::Color(255, 255, 255, 0), true);
+    Gdiplus::Pen edge(Gdiplus::Color(230, 15, 23, 35), 2.0f);
+    edge.SetLineJoin(Gdiplus::LineJoinRound);
+    graphics.DrawPath(&edge, &path);
+    Gdiplus::SolidBrush fill(Gdiplus::Color(255, 255, 255, 0));
+    graphics.FillPath(&fill, &path);
     return bitmap;
 }
 
@@ -80,6 +96,10 @@ bool SavePreview(const wchar_t* path) {
     CpuSample sample;
     sample.usagePercent = 12.3;
     sample.frequencyGhz = 4.25;
+    sample.hardware.temperatureC = 55;
+    sample.hardware.packageWatts = 42.1;
+    sample.memoryPercent = 37.5;
+    sample.gpuPercent = 18.0;
     auto bitmap = RenderOverlay(sample, 2.0f);
     if (!bitmap) return false;
     UINT count = 0, bytes = 0;

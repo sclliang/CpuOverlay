@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cmath>
 #include <vector>
+#include <map>
+#include <string>
 
 namespace {
 // The Windows SDK omits PROCESSOR_POWER_INFORMATION; layout is documented by Microsoft.
@@ -37,7 +39,7 @@ CpuSampler::~CpuSampler() { if (query_) PdhCloseQuery(query_); }
 void CpuSampler::OpenCounters() {
     if (query_) PdhCloseQuery(query_);
     query_ = nullptr;
-    usage_ = performance_ = frequency_ = nullptr;
+    usage_ = performance_ = frequency_ = gpu_ = nullptr;
     if (PdhOpenQueryW(nullptr, 0, &query_) != ERROR_SUCCESS) return;
     auto add = [this](const wchar_t* path, PDH_HCOUNTER& counter) {
         if (PdhAddEnglishCounterW(query_, path, 0, &counter) != ERROR_SUCCESS) counter = nullptr;
@@ -46,6 +48,36 @@ void CpuSampler::OpenCounters() {
     if (!usage_) add(L"\\Processor(_Total)\\% Processor Time", usage_);
     add(L"\\Processor Information(_Total)\\% Processor Performance", performance_);
     add(L"\\Processor Information(_Total)\\Processor Frequency", frequency_);
+    add(L"\\GPU Engine(*)\\Utilization Percentage", gpu_);
+}
+
+std::optional<double> CpuSampler::ReadGpuUsage(unsigned& engineCount) const {
+    engineCount = 0;
+    if (!gpu_) return {};
+    DWORD bytes = 0, count = 0;
+    const DWORD format = PDH_FMT_DOUBLE | PDH_FMT_NOCAP100;
+    if (PdhGetFormattedCounterArrayW(gpu_, format, &bytes, &count, nullptr) != PDH_MORE_DATA || !bytes || bytes > 64 * 1024 * 1024)
+        return {};
+    std::vector<BYTE> buffer(bytes);
+    auto items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buffer.data());
+    if (PdhGetFormattedCounterArrayW(gpu_, format, &bytes, &count, items) != ERROR_SUCCESS) return {};
+    std::map<std::wstring, double> engines;
+    for (DWORD i = 0; i < count; ++i) {
+        const auto& value = items[i].FmtValue;
+        if (!items[i].szName || (value.CStatus != PDH_CSTATUS_VALID_DATA && value.CStatus != PDH_CSTATUS_NEW_DATA) ||
+            !std::isfinite(value.doubleValue) || value.doubleValue < 0) continue;
+        const std::wstring name(items[i].szName);
+        const auto luid = name.find(L"luid_");
+        const auto type = name.find(L"_engtype_");
+        if (luid == std::wstring::npos || type == std::wstring::npos || type <= luid) continue;
+        // Sum processes on the SAME physical engine; never add different engines or GPUs together.
+        engines[name.substr(luid, type - luid)] += value.doubleValue;
+    }
+    if (engines.empty()) return {};
+    double busiest = 0;
+    for (const auto& entry : engines) busiest = std::max(busiest, entry.second);
+    engineCount = static_cast<unsigned>(engines.size());
+    return std::clamp(busiest, 0.0, 100.0);
 }
 
 std::optional<double> CpuSampler::Read(PDH_HCOUNTER counter) const {
@@ -82,13 +114,22 @@ void CpuSampler::Prime() {
     if (query_) PdhCollectQueryData(query_);
     haveTimes_ = false;
     ReadSystemUsage();
+    pawn_.Prime();
 }
 
 CpuSample CpuSampler::Collect() {
     CpuSample sample;
+    sample.hardware = pawn_.Collect();
+    MEMORYSTATUSEX memory{sizeof(memory)};
+    if (GlobalMemoryStatusEx(&memory) && memory.ullTotalPhys && memory.ullAvailPhys <= memory.ullTotalPhys) {
+        sample.memoryTotalBytes = memory.ullTotalPhys;
+        sample.memoryUsedBytes = memory.ullTotalPhys - memory.ullAvailPhys;
+        sample.memoryPercent = 100.0 * static_cast<double>(sample.memoryUsedBytes) / static_cast<double>(sample.memoryTotalBytes);
+    }
     auto fallbackUsage = ReadSystemUsage();
     const bool collected = query_ && PdhCollectQueryData(query_) == ERROR_SUCCESS;
     if (collected) {
+        sample.gpuPercent = ReadGpuUsage(sample.gpuEngineCount);
         sample.usagePercent = Read(usage_);
         if (sample.usagePercent && *sample.usagePercent >= 0) {
             sample.usagePercent = std::clamp(*sample.usagePercent, 0.0, 100.0);

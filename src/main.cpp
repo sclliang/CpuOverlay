@@ -6,6 +6,7 @@
 #include <gdiplus.h>
 #include "cpu_sampler.h"
 #include "overlay_renderer.h"
+#include "startup.h"
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
@@ -26,12 +27,6 @@ constexpr UINT kTray = WM_APP + 1, kSample = WM_APP + 2;
 constexpr UINT kShow = WM_APP + 3, kHide = WM_APP + 4, kToggle = WM_APP + 5, kMenu = WM_APP + 6;
 constexpr UINT kTrayId = 1, kHotkeyId = 1;
 enum Command : UINT { Toggle = 100, Startup, About, Exit, RetryHotkey, Corner = 200, Size = 300, Monitor = 1000 };
-
-std::wstring ExecutablePath() {
-    std::vector<wchar_t> buffer(32768);
-    const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
-    return length && length < buffer.size() ? std::wstring(buffer.data(), length) : std::wstring();
-}
 
 std::wstring ReadString(const wchar_t* key, const wchar_t* name) {
     DWORD bytes = 0;
@@ -59,25 +54,15 @@ LSTATUS WriteValue(const wchar_t* keyName, const wchar_t* name, DWORD type, cons
     return result;
 }
 void WriteDword(const wchar_t* name, DWORD value) { WriteValue(kSettingsKey, name, REG_DWORD, &value, sizeof(value)); }
-bool StartupEnabled() { return !ReadString(kRunKey, L"CpuOverlay").empty(); }
+bool StartupEnabled() { return LogonTaskEnabled() || !ReadString(kRunKey, L"CpuOverlay").empty(); }
 
 LSTATUS SetStartup(bool enabled) {
-    LSTATUS result;
-    if (enabled) {
-        const auto path = ExecutablePath();
-        if (path.empty()) return ERROR_BAD_PATHNAME;
-        const std::wstring command = L"\"" + path + L"\" --startup";
-        // Run entries have a documented 260-character command limit.
-        if (command.size() >= 260) return ERROR_FILENAME_EXCED_RANGE;
-        result = WriteValue(kRunKey, L"CpuOverlay", REG_SZ, command.c_str(), static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t)));
-    } else {
-        HKEY key = nullptr;
-        result = RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_SET_VALUE, &key);
-        if (result == ERROR_SUCCESS) {
-            result = RegDeleteValueW(key, L"CpuOverlay");
-            RegCloseKey(key);
-        }
-        if (result == ERROR_FILE_NOT_FOUND) result = ERROR_SUCCESS;
+    const LSTATUS result = static_cast<LSTATUS>(ConfigureLogonTask(enabled));
+    if (result != ERROR_SUCCESS) return result;
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_SET_VALUE, &key) == ERROR_SUCCESS) {
+        RegDeleteValueW(key, L"CpuOverlay");
+        RegCloseKey(key);
     }
     if (result == ERROR_SUCCESS) WriteDword(L"Initialized", 1);
     return result;
@@ -110,7 +95,8 @@ int WriteDiagnostics(const wchar_t* path) {
     if (!file) return 2;
     CpuSampler sampler;
     sampler.Prime();
-    file << "{\n  \"version\": \"1.0.0.0\",\n  \"sample_interval_ms\": 1000,\n  \"samples\": [\n";
+    file << "{\n  \"version\": \"1.1.0.0\",\n  \"elevated\": " << (IsElevated() ? "true" : "false")
+         << ",\n  \"sample_interval_ms\": 1000,\n  \"samples\": [\n";
     bool valid = true;
     for (int i = 0; i < 4; ++i) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -122,7 +108,26 @@ int WriteDiagnostics(const wchar_t* path) {
         file << ", \"frequency_ghz\": ";
         if (sample.frequencyGhz) file << *sample.frequencyGhz;
         else { file << "null"; valid = false; }
-        file << ", \"usage_source\": \"" << sample.usageSource << "\", \"frequency_source\": \"" << sample.frequencySource << "\"}";
+        auto number = [&file, &valid](const char* key, const std::optional<double>& value) {
+            file << ", \"" << key << "\": ";
+            if (value) file << *value;
+            else { file << "null"; valid = false; }
+        };
+        number("cpu_temperature_c", sample.hardware.temperatureC);
+        number("cpu_package_watts", sample.hardware.packageWatts);
+        number("memory_percent", sample.memoryPercent);
+        number("gpu_percent", sample.gpuPercent);
+        file << ", \"memory_used_bytes\": " << sample.memoryUsedBytes << ", \"memory_total_bytes\": " << sample.memoryTotalBytes
+             << ", \"gpu_engine_count\": " << sample.gpuEngineCount
+             << ", \"usage_source\": \"" << sample.usageSource << "\", \"frequency_source\": \"" << sample.frequencySource
+             << "\", \"cpu_sensor_source\": \"pawnio_intel_msr\", \"memory_source\": \"GlobalMemoryStatusEx\", \"gpu_source\": \"windows_gpu_engine\""
+             << ", \"pawnio_status\": \"" << sample.hardware.status << "\", \"pawnio_hresult\": \"0x" << std::hex
+             // Module origin helps verify both portable and logon startup contexts.
+             << static_cast<DWORD>(sample.hardware.error) << std::dec << "\", \"pawnio_module_source\": \"" << sample.hardware.moduleSource
+             << "\", \"thermal_msr_raw\": " << sample.hardware.thermalRaw
+             << ", \"tj_max_c\": " << sample.hardware.tjMaxC << ", \"energy_counter_raw\": " << sample.hardware.energyRaw
+             << std::setprecision(9) << ", \"energy_unit_j\": " << sample.hardware.energyUnitJoules
+             << ", \"power_interval_s\": " << sample.hardware.intervalSeconds << "}";
     }
     file << "\n  ]\n}\n";
     return file.good() ? (valid ? 0 : 3) : 2;
@@ -139,7 +144,12 @@ public:
     }
 
     int Run(bool show, bool noAutostart) {
-        corner_ = std::min<DWORD>(ReadDword(L"Corner", 0), 3);
+        // Upgrade the previous four-corner layout to the requested top-center default once.
+        if (ReadDword(L"PositionVersion", 0) < 2) {
+            WriteDword(L"Corner", 4);
+            WriteDword(L"PositionVersion", 2);
+        }
+        corner_ = std::min<DWORD>(ReadDword(L"Corner", 4), 4);
         size_ = std::min<DWORD>(ReadDword(L"Size", 1), 2);
         monitorName_ = ReadString(kSettingsKey, L"Monitor");
         WNDCLASSEXW controllerClass{sizeof(WNDCLASSEXW)};
@@ -155,6 +165,9 @@ public:
         controller_ = CreateWindowExW(WS_EX_TOOLWINDOW, kControllerClass, L"CpuOverlay Controller", WS_OVERLAPPED,
             0, 0, 0, 0, nullptr, nullptr, instance_, this);
         if (!controller_) { ShowError(L"无法创建程序窗口。", GetLastError()); return 1; }
+        // Permit only harmless display/exit requests from a second, unelevated launch.
+        for (UINT message : {kShow, kHide, kToggle, kMenu, static_cast<UINT>(WM_CLOSE)})
+            ChangeWindowMessageFilterEx(controller_, message, MSGFLT_ALLOW, nullptr);
         overlay_ = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             kOverlayClass, L"CpuOverlay", WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, instance_, this);
         if (!overlay_) { ShowError(L"无法创建悬浮窗口。", GetLastError()); return 1; }
@@ -258,13 +271,23 @@ private:
         if (FAILED(GetDpiForMonitor(chosen->handle, MDT_EFFECTIVE_DPI, &dpiX, &dpiY))) dpiX = 96;
         const float sizeScale[] = {0.8f, 1.0f, 1.3f};
         const float scale = static_cast<float>(dpiX) / 96.0f * sizeScale[size_];
-        auto bitmap = RenderOverlay(Latest(), scale);
-        if (!bitmap) return false;
         const auto& work = chosen->info.rcWork;
         const int margin = MulDiv(16, static_cast<int>(dpiX), 96);
+        const auto sample = Latest();
+        // Expose the same readings to accessibility and desktop integration checks.
+        std::wstring title = L"CpuOverlay — " + FormatOverlayText(sample);
+        if (!sample.hardware.temperatureC || !sample.hardware.packageWatts) {
+            const std::string status(sample.hardware.status);
+            title += L" — PawnIO: " + std::wstring(status.begin(), status.end()) +
+                L" (" + std::to_wstring(static_cast<DWORD>(sample.hardware.error)) + L")";
+        }
+        SetWindowTextW(overlay_, title.c_str());
+        auto bitmap = RenderOverlay(sample, scale, std::max(1L, work.right - work.left - 2 * margin));
+        if (!bitmap) return false;
         const int width = static_cast<int>(bitmap->GetWidth()), height = static_cast<int>(bitmap->GetHeight());
-        const bool left = corner_ == 1 || corner_ == 3, bottom = corner_ >= 2;
-        POINT position{left ? work.left + margin : work.right - width - margin,
+        const bool left = corner_ == 1 || corner_ == 3, bottom = corner_ == 2 || corner_ == 3;
+        POINT position{corner_ == 4 ? work.left + (work.right - work.left - width) / 2 :
+                (left ? work.left + margin : work.right - width - margin),
             bottom ? work.bottom - height - margin : work.top + margin};
         position.x = std::max(work.left, position.x);
         position.y = std::max(work.top, position.y);
@@ -297,7 +320,7 @@ private:
         data.hWnd = controller_; data.uID = kTrayId; data.uFlags = NIF_TIP;
         const auto sample = Latest();
         if (visible_ && sample.usagePercent && sample.frequencyGhz)
-            swprintf_s(data.szTip, L"CpuOverlay | CPU %.1f%% | %.2f GHz\nAlt+F1 显示 / 隐藏", *sample.usagePercent, *sample.frequencyGhz);
+            wcsncpy_s(data.szTip, (FormatOverlayText(sample) + L"\nAlt+F1 显示 / 隐藏").c_str(), _TRUNCATE);
         else wcscpy_s(data.szTip, visible_ ? L"CpuOverlay — 正在采样 | Alt+F1 隐藏" : L"CpuOverlay — 已隐藏 | Alt+F1 显示");
         Shell_NotifyIconW(NIM_MODIFY, &data);
     }
@@ -321,8 +344,8 @@ private:
         HMENU menu = CreatePopupMenu(), positions = CreatePopupMenu(), sizes = CreatePopupMenu(), displays = CreatePopupMenu();
         AppendMenuW(menu, MF_STRING, Toggle, visible_ ? L"隐藏监控\tAlt+F1" : L"显示监控\tAlt+F1");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        const wchar_t* corners[] = {L"右上角", L"左上角", L"右下角", L"左下角"};
-        for (UINT i = 0; i < 4; ++i) AppendMenuW(positions, MF_STRING | (corner_ == i ? MF_CHECKED : 0), Corner + i, corners[i]);
+        const wchar_t* corners[] = {L"右上角", L"左上角", L"右下角", L"左下角", L"顶部居中"};
+        for (UINT i = 0; i < 5; ++i) AppendMenuW(positions, MF_STRING | (corner_ == i ? MF_CHECKED : 0), Corner + i, corners[i]);
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(positions), L"显示位置");
         const wchar_t* sizeNames[] = {L"小", L"标准", L"大"};
         for (UINT i = 0; i < 3; ++i) AppendMenuW(sizes, MF_STRING | (size_ == i ? MF_CHECKED : 0), Size + i, sizeNames[i]);
@@ -356,20 +379,24 @@ private:
         } else if (selected == RetryHotkey) RegisterShortcut();
         else if (selected == About) {
             MessageBoxW(nullptr,
-                L"CpuOverlay 1.0.0.0\n\n"
+                L"CpuOverlay 1.1.0.0\n\n"
                 L"Alt+F1：显示 / 隐藏；单击托盘图标也可切换。\n"
                 L"右键托盘图标：位置、字号、显示器、自启与退出。\n"
                 L"背景透明、鼠标穿透、置顶，不抢键盘焦点。\n"
                 L"每秒更新；隐藏后暂停采样。\n\n"
-                L"CPU：所有逻辑处理器的平均忙碌时间占比。\n"
-                L"FREQ：Windows 性能计数器估算频率；不支持时使用系统报告值。\n"
+                L"处理器：所有逻辑处理器的平均忙碌时间占比。\n"
+                L"频率：Windows 性能计数器估算频率。\n"
+                L"温度 / 功耗：PawnIO 读取 Intel CPU 温度及封装功耗。\n"
+                L"内存：物理内存使用百分比。\n"
+                L"显卡：Windows GPU 引擎统计中最繁忙的引擎占用。\n"
                 L"各核心频率可能不同，读数可能与任务管理器不同。\n"
                 L"普通置顶窗口不能保证覆盖独占全屏游戏或安全桌面。\n\n"
-                L"首次运行默认启用登录自启；可在托盘中取消。\n"
+                L"硬件传感器需要已安装 PawnIO 及管理员权限。\n"
+                L"登录自启使用当前用户的最高权限计划任务；可在托盘中取消。\n"
                 L"删除程序前请先取消自启并退出。\n\n"
                 L"Copyright (c) 2026 sixunited. Author: sclliang",
                 L"关于 CpuOverlay", MB_OK | MB_ICONINFORMATION);
-        } else if (selected >= Corner && selected < Corner + 4) {
+        } else if (selected >= Corner && selected < Corner + 5) {
             corner_ = selected - Corner; WriteDword(L"Corner", corner_); if (visible_) Render();
         } else if (selected >= Size && selected < Size + 3) {
             size_ = selected - Size; WriteDword(L"Size", size_); if (visible_) Render();
@@ -432,7 +459,7 @@ private:
     HICON icon_ = nullptr;
     UINT taskbarCreated_ = 0;
     bool visible_ = false, hotkeyRegistered_ = false, trayAdded_ = false;
-    DWORD corner_ = 0, size_ = 1;
+    DWORD corner_ = 4, size_ = 1;
     std::wstring monitorName_;
     std::thread worker_;
     std::mutex mutex_;
@@ -443,7 +470,7 @@ private:
 };
 }
 
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int) {
     int argc = 0;
     auto argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (!argv) return 1;
@@ -456,8 +483,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         return it != args.end() && it + 1 != args.end() ? *(it + 1) : std::wstring();
     };
     if (has(L"--diagnostics")) { const auto path = output(L"--diagnostics"); return path.empty() ? 2 : WriteDiagnostics(path.c_str()); }
-    if (has(L"--enable-startup")) return SetStartup(true) == ERROR_SUCCESS ? 0 : 1;
-    if (has(L"--disable-startup")) return SetStartup(false) == ERROR_SUCCESS ? 0 : 1;
     ULONG_PTR gdiplus = 0;
     Gdiplus::GdiplusStartupInput gdiplusInput;
     if (Gdiplus::GdiplusStartup(&gdiplus, &gdiplusInput, nullptr) != Gdiplus::Ok) return 1;
@@ -466,6 +491,32 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         const bool saved = !path.empty() && SavePreview(path.c_str());
         Gdiplus::GdiplusShutdown(gdiplus);
         return saved ? 0 : 2;
+    }
+    if (!has(L"--enable-startup") && !has(L"--disable-startup")) {
+        const HWND existing = FindWindowW(kControllerClass, nullptr);
+        if (existing) {
+            UINT request = kShow;
+            if (has(L"--exit")) request = WM_CLOSE;
+            else if (has(L"--hide")) request = kHide;
+            else if (has(L"--toggle")) request = kToggle;
+            else if (has(L"--menu")) { AllowSetForegroundWindow(ASFW_ANY); request = kMenu; }
+            const bool sent = has(L"--startup") || PostMessageW(existing, request, 0, 0);
+            Gdiplus::GdiplusShutdown(gdiplus);
+            return sent ? 0 : 1;
+        }
+        if (has(L"--exit")) { Gdiplus::GdiplusShutdown(gdiplus); return 0; }
+    }
+    if (!IsElevated()) {
+        const auto error = RelaunchElevated(commandLine);
+        if (error != ERROR_SUCCESS && error != ERROR_CANCELLED) ShowError(L"无法获得 PawnIO 所需的管理员权限。", error);
+        Gdiplus::GdiplusShutdown(gdiplus);
+        return error == ERROR_SUCCESS ? 0 : 1;
+    }
+    if (has(L"--enable-startup") || has(L"--disable-startup")) {
+        const auto result = SetStartup(has(L"--enable-startup"));
+        if (result != ERROR_SUCCESS) ShowError(L"无法修改登录自启任务。", result);
+        Gdiplus::GdiplusShutdown(gdiplus);
+        return result == ERROR_SUCCESS ? 0 : 1;
     }
     HANDLE instanceMutex = CreateMutexW(nullptr, FALSE, L"Local\\sixunited.CpuOverlay.Instance.1");
     const DWORD mutexStatus = GetLastError();

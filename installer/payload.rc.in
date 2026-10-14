@@ -1,0 +1,40 @@
+#pragma code_page(65001)
+#include <windows.h>
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+1 ICON "@CMAKE_SOURCE_DIR@/resources/CpuOverlay.ico"
+1 RT_MANIFEST "@CMAKE_SOURCE_DIR@/installer/setup.manifest"
+101 RCDATA "$<TARGET_FILE:CpuOverlay>"
+102 RCDATA "@CMAKE_SOURCE_DIR@/third_party/pawnio/IntelMSR.bin"
+103 RCDATA "@CMAKE_SOURCE_DIR@/third_party/pawnio/COPYING"
+104 RCDATA "@CMAKE_SOURCE_DIR@/third_party/pawnio/IntelMSR.p"
+105 RCDATA "@CMAKE_SOURCE_DIR@/third_party/pawnio/README.md"
+106 RCDATA "@CMAKE_SOURCE_DIR@/artifacts/pawnio-downloads/PawnIO_setup.exe"
+107 RCDATA "@CMAKE_SOURCE_DIR@/README.md"
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 1,1,0,0
+ PRODUCTVERSION 1,1,0,0
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE 0x0L
+BEGIN
+ BLOCK "StringFileInfo"
+ BEGIN
+  BLOCK "040904B0"
+  BEGIN
+   VALUE "CompanyName", "sixunited\0"
+   VALUE "FileDescription", "CpuOverlay Installer with PawnIO Driver Setup\0"
+   VALUE "FileVersion", "1.1.0.0\0"
+   VALUE "InternalName", "CpuOverlay-Setup\0"
+   VALUE "LegalCopyright", "Copyright (c) 2026 sixunited. Author: sclliang\0"
+   VALUE "OriginalFilename", "CpuOverlay-Setup.exe\0"
+   VALUE "ProductName", "CpuOverlay\0"
+   VALUE "ProductVersion", "1.1.0.0\0"
+  END
+ END
+ BLOCK "VarFileInfo"
+ BEGIN
+  VALUE "Translation", 0x0409, 1200
+ END
+END

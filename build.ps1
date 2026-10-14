@@ -1,6 +1,7 @@
 param([ValidateSet('Release','Debug')][string]$Configuration = 'Release')
 $ErrorActionPreference = 'Stop'
 $projectRoot = $PSScriptRoot
+& (Join-Path $projectRoot 'scripts\fetch-pawnio.ps1')
 $cmakeCommand = Get-Command cmake.exe -ErrorAction SilentlyContinue
 if (-not $cmakeCommand) { throw 'CMake 3.24+ is required. Install the Visual Studio C++ CMake tools.' }
 $vswherePath = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'

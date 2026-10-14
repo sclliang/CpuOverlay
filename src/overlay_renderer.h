@@ -3,7 +3,9 @@
 #include <objidl.h>
 #include <gdiplus.h>
 #include <memory>
+#include <string>
 
-std::unique_ptr<Gdiplus::Bitmap> RenderOverlay(const CpuSample& sample, float scale);
+std::wstring FormatOverlayText(const CpuSample& sample);
+std::unique_ptr<Gdiplus::Bitmap> RenderOverlay(const CpuSample& sample, float scale, int maxWidth = 0);
 bool PresentOverlay(HWND window, Gdiplus::Bitmap& bitmap, POINT position);
 bool SavePreview(const wchar_t* path);

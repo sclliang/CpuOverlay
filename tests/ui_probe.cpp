@@ -10,7 +10,7 @@ unsigned transitions = 0, clicks = 0, overlayClicks = 0;
 bool seen = false, previousVisible = false;
 std::wstring status;
 std::filesystem::path reportPath;
-bool clickThrough = false, styles = false, foreground = false, visible = false;
+bool clickThrough = false, styles = false, foreground = false, visible = false, topCenter = false;
 
 void Refresh() {
     HWND overlay = FindWindowW(L"sixunited.CpuOverlay.Overlay.1", nullptr);
@@ -23,15 +23,23 @@ void Refresh() {
     styles = (extended & required) == required;
     RECT rect{};
     if (overlay) GetWindowRect(overlay, &rect);
+    wchar_t title[1024]{};
+    if (overlay) GetWindowTextW(overlay, title, ARRAYSIZE(title));
+    MONITORINFO monitor{sizeof(monitor)};
+    GetMonitorInfoW(MonitorFromWindow(overlay, MONITOR_DEFAULTTOPRIMARY), &monitor);
+    topCenter = overlay && abs(rect.left + rect.right - monitor.rcWork.left - monitor.rcWork.right) <= 1 &&
+        rect.top >= monitor.rcWork.top && rect.top - monitor.rcWork.top <= 64;
     const POINT testPoint{rect.left + 100, rect.top + 25};
     clickThrough = visible && WindowFromPoint(testPoint) == probe;
     foreground = GetForegroundWindow() == probe;
     status = L"CpuOverlay integration probe\n\n"
         L"Use Alt+F1 to hide/show the overlay.\n"
-        L"Click the TOP RIGHT text area to verify mouse pass-through.\n"
+        L"Click the TOP CENTER text area to verify mouse pass-through.\n"
         L"Close this test window when finished.\n\n";
     status += L"Overlay found: " + std::wstring(overlay ? L"YES" : L"NO") + L"\n";
     status += L"Overlay visible: " + std::wstring(visible ? L"YES" : L"NO") + L"\n";
+    status += std::wstring(title) + L"\n";
+    status += L"Top-center placement: " + std::wstring(topCenter ? L"PASS" : L"FAIL") + L"\n";
     status += L"Layered / transparent / topmost / noactivate / toolwindow: " + std::wstring(styles ? L"PASS" : L"FAIL") + L"\n";
     status += L"Mouse target beneath overlay: " + std::wstring(clickThrough ? L"PASS" : L"(hidden or not above probe)") + L"\n";
     status += L"Keyboard focus stays in test window: " + std::wstring(foreground ? L"PASS" : L"NO") + L"\n";
@@ -76,7 +84,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             report << "{\n  \"window_styles_pass\": " << (styles ? "true" : "false")
                 << ",\n  \"visibility_transitions\": " << transitions
                 << ",\n  \"clicks_under_visible_overlay\": " << overlayClicks
-                << ",\n  \"foreground_preserved\": " << (foreground ? "true" : "false") << "\n}\n";
+                << ",\n  \"foreground_preserved\": " << (foreground ? "true" : "false")
+                << ",\n  \"top_center_pass\": " << (topCenter ? "true" : "false") << "\n}\n";
         }
         DestroyWindow(window); return 0;
     }
