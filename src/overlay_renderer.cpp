@@ -12,46 +12,90 @@ std::wstring Value(const std::optional<double>& value, int decimals, const wchar
     swprintf_s(buffer, L"%.*f%s", decimals, *value, unit);
     return buffer;
 }
+std::vector<std::wstring> Metrics(const CpuSample& sample) {
+    return {L"处理器:" + Value(sample.usagePercent, 1, L"%"), L"频率:" + Value(sample.frequencyGhz, 2, L"GHz"),
+        L"温度:" + Value(sample.hardware.temperatureC, 0, L"℃"), L"功耗:" + Value(sample.hardware.packageWatts, 1, L"W"),
+        L"内存:" + Value(sample.memoryPercent, 1, L"%"), L"显卡:" + Value(sample.gpuPercent, 1, L"%")};
+}
 }
 
 std::wstring FormatOverlayText(const CpuSample& sample) {
-    return L"处理器:" + Value(sample.usagePercent, 1, L"%") +
-        L" | 频率:" + Value(sample.frequencyGhz, 2, L"GHz") +
-        L" | 温度:" + Value(sample.hardware.temperatureC, 0, L"℃") +
-        L" | 功耗:" + Value(sample.hardware.packageWatts, 1, L"W") +
-        L" | 内存:" + Value(sample.memoryPercent, 1, L"%") +
-        L" | 显卡:" + Value(sample.gpuPercent, 1, L"%");
+    std::wstring text;
+    for (const auto& item : Metrics(sample)) { if (!text.empty()) text += L" | "; text += item; }
+    return text;
 }
 
-std::unique_ptr<Gdiplus::Bitmap> RenderOverlay(const CpuSample& sample, float scale, int maxWidth) {
+std::unique_ptr<Gdiplus::Bitmap> RenderOverlay(const CpuSample& sample, float scale, int maxWidth, int maxHeight,
+    const OverlaySettings& settings, bool positioning) {
     if (!std::isfinite(scale) || scale <= 0) return nullptr;
-    Gdiplus::FontFamily family(L"Microsoft YaHei UI");
+    Gdiplus::FontFamily family(settings.font.c_str());
     Gdiplus::FontFamily fallback(L"Microsoft YaHei");
     const auto* chosen = family.IsAvailable() ? &family : (fallback.IsAvailable() ? &fallback : Gdiplus::FontFamily::GenericSansSerif());
+    int style = (settings.bold ? Gdiplus::FontStyleBold : Gdiplus::FontStyleRegular) | (settings.italic ? Gdiplus::FontStyleItalic : 0);
+    if (!chosen->IsStyleAvailable(style)) style = chosen->IsStyleAvailable(Gdiplus::FontStyleRegular) ? Gdiplus::FontStyleRegular : Gdiplus::FontStyleBold;
+    const float em = static_cast<float>(std::clamp(settings.fontPoints, 8, 96)) * 96.0f / 72.0f;
+    const float lineHeight = chosen->GetEmHeight(style) ? em * chosen->GetLineSpacing(style) / chosen->GetEmHeight(style) : em * 1.5f;
     Gdiplus::GraphicsPath path;
     Gdiplus::StringFormat format(Gdiplus::StringFormat::GenericTypographic());
-    const auto line = FormatOverlayText(sample);
-    if (path.AddString(line.c_str(), -1, chosen, Gdiplus::FontStyleBold, 24, Gdiplus::PointF(8, 7), &format) != Gdiplus::Ok)
-        return nullptr;
+    float x = 0, y = 0;
+    const auto metrics = Metrics(sample);
+    for (size_t i = 0; i < metrics.size(); ++i) {
+        Gdiplus::GraphicsPath item;
+        if (item.AddString(metrics[i].c_str(), -1, chosen, style, em, Gdiplus::PointF(x, y), &format) != Gdiplus::Ok) return nullptr;
+        Gdiplus::RectF itemBounds; item.GetBounds(&itemBounds); path.AddPath(&item, FALSE);
+        if (settings.vertical) y += lineHeight + static_cast<float>(settings.gap);
+        else if (i + 1 < metrics.size()) {
+            x = itemBounds.GetRight() + static_cast<float>(settings.gap) + 2;
+            Gdiplus::GraphicsPath separator;
+            separator.AddString(L"|", 1, chosen, style, em, Gdiplus::PointF(x, y), &format);
+            separator.GetBounds(&itemBounds); path.AddPath(&separator, FALSE);
+            x = itemBounds.GetRight() + static_cast<float>(settings.gap) + 2;
+        }
+    }
     Gdiplus::RectF bounds;
     path.GetBounds(&bounds);
-    const float logicalWidth = bounds.GetRight() + 8;
-    const float logicalHeight = std::max(44.0f, bounds.GetBottom() + 8);
+    const float padding = 6.0f + static_cast<float>(settings.outlineWidth);
+    Gdiplus::Matrix translate;
+    translate.Translate(padding - bounds.X, padding - bounds.Y); path.Transform(&translate);
+    const float logicalWidth = bounds.Width + padding * 2;
+    const float logicalHeight = std::max(44.0f, bounds.Height + padding * 2);
     if (maxWidth > 0) scale = std::min(scale, static_cast<float>(maxWidth) / logicalWidth);
+    if (maxHeight > 0) scale = std::min(scale, static_cast<float>(maxHeight) / logicalHeight);
     const int width = static_cast<int>(std::ceil(logicalWidth * scale));
     const int height = static_cast<int>(std::ceil(logicalHeight * scale));
+    if (width < 1 || height < 1 || static_cast<uint64_t>(width) * height > 32 * 1024 * 1024) return nullptr;
     auto bitmap = std::make_unique<Gdiplus::Bitmap>(width, height, PixelFormat32bppPARGB);
     if (bitmap->GetLastStatus() != Gdiplus::Ok) return nullptr;
+    {
     Gdiplus::Graphics graphics(bitmap.get());
     graphics.Clear(Gdiplus::Color(0, 0, 0, 0));
     graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
     graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
     graphics.ScaleTransform(scale, scale);
-    Gdiplus::Pen edge(Gdiplus::Color(230, 15, 23, 35), 2.0f);
+    if (positioning) {
+        Gdiplus::SolidBrush background(Gdiplus::Color(245, 246, 248, 251));
+        graphics.FillRectangle(&background, 0.0f, 0.0f, logicalWidth, logicalHeight);
+    }
+    const BYTE alpha = 255;
+    Gdiplus::Pen edge(Gdiplus::Color(alpha, GetRValue(settings.outlineColor), GetGValue(settings.outlineColor), GetBValue(settings.outlineColor)), static_cast<float>(settings.outlineWidth));
     edge.SetLineJoin(Gdiplus::LineJoinRound);
-    graphics.DrawPath(&edge, &path);
-    Gdiplus::SolidBrush fill(Gdiplus::Color(255, 255, 255, 0));
+    if (settings.outlineWidth > 0) graphics.DrawPath(&edge, &path);
+    Gdiplus::SolidBrush fill(Gdiplus::Color(alpha, GetRValue(settings.color), GetGValue(settings.color), GetBValue(settings.color)));
     graphics.FillPath(&fill, &path);
+    }
+    const int opacity = std::clamp(settings.opacity, 10, 100);
+    if (opacity < 100) {
+        Gdiplus::Rect region(0, 0, width, height);
+        Gdiplus::BitmapData data{};
+        if (bitmap->LockBits(&region, Gdiplus::ImageLockModeRead | Gdiplus::ImageLockModeWrite, PixelFormat32bppPARGB, &data) != Gdiplus::Ok) return nullptr;
+        // Apply opacity once to the completed, premultiplied image. Applying it
+        // separately to fill and outline makes their overlapping pixels darker.
+        for (int rowIndex = 0; rowIndex < height; ++rowIndex) {
+            auto row = static_cast<BYTE*>(data.Scan0) + static_cast<ptrdiff_t>(rowIndex) * data.Stride;
+            for (int channel = 0; channel < width * 4; ++channel) row[channel] = static_cast<BYTE>(row[channel] * opacity / 100);
+        }
+        bitmap->UnlockBits(&data);
+    }
     return bitmap;
 }
 
@@ -92,7 +136,7 @@ bool PresentOverlay(HWND window, Gdiplus::Bitmap& bitmap, POINT position) {
     return success;
 }
 
-bool SavePreview(const wchar_t* path) {
+CpuSample PreviewSample() {
     CpuSample sample;
     sample.usagePercent = 12.3;
     sample.frequencyGhz = 4.25;
@@ -100,7 +144,11 @@ bool SavePreview(const wchar_t* path) {
     sample.hardware.packageWatts = 42.1;
     sample.memoryPercent = 37.5;
     sample.gpuPercent = 18.0;
-    auto bitmap = RenderOverlay(sample, 2.0f);
+    return sample;
+}
+
+bool SavePreview(const wchar_t* path) {
+    auto bitmap = RenderOverlay(PreviewSample(), 2.0f);
     if (!bitmap) return false;
     UINT count = 0, bytes = 0;
     Gdiplus::GetImageEncodersSize(&count, &bytes);

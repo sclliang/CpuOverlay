@@ -16,8 +16,8 @@ $fields = @{
     CompanyName = 'sixunited'
     ProductName = 'CpuOverlay'
     FileDescription = 'CPU, Memory and GPU Performance Desktop Overlay'
-    FileVersion = '1.3.0.0'
-    ProductVersion = '1.3.0.0'
+    FileVersion = '1.4.0.0'
+    ProductVersion = '1.4.0.0'
     OriginalFilename = 'CpuOverlay.exe'
     InternalName = 'CpuOverlay'
     LegalCopyright = 'Copyright (c) 2026 sixunited. Author: sclliang'
@@ -208,7 +208,7 @@ $dependencies = & $dumpbin /dependents $exePath
 Assert-Condition ($LASTEXITCODE -eq 0) 'dumpbin failed.'
 $dlls = @($dependencies | ForEach-Object { if ($_ -match '^\s+([A-Za-z0-9_.-]+\.dll)\s*$') { $Matches[1] } })
 Assert-Condition ($dlls.Count -gt 0) 'No import dependencies found.'
-$systemDlls = @('USER32.dll','GDI32.dll','gdiplus.dll','SHELL32.dll','ADVAPI32.dll','pdh.dll','POWRPROF.dll','api-ms-win-shcore-scaling-l1-1-1.dll','KERNEL32.dll','ole32.dll','OLEAUT32.dll','COMCTL32.dll','VERSION.dll')
+$systemDlls = @('USER32.dll','GDI32.dll','gdiplus.dll','SHELL32.dll','ADVAPI32.dll','pdh.dll','POWRPROF.dll','api-ms-win-shcore-scaling-l1-1-1.dll','KERNEL32.dll','ole32.dll','OLEAUT32.dll','COMCTL32.dll','COMDLG32.dll','VERSION.dll')
 foreach ($dll in $dlls) { Assert-Condition ($dll -in $systemDlls) "Unexpected runtime dependency: $dll" }
 $setupImports = & $dumpbin /dependents $setupPath
 Assert-Condition ($LASTEXITCODE -eq 0) 'Installer dumpbin failed.'
