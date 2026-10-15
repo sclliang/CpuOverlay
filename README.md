@@ -1,6 +1,6 @@
 # CpuOverlay
 
-Windows 10 / 11 x64 桌面性能监控，C++ / Win32 原生实现。版本 **1.1.0.0**。
+Windows 10 / 11 x64 桌面性能监控，C++ / Win32 原生实现。版本 **1.2.0.0**。
 
 ```text
 处理器:12.3% | 频率:4.25GHz | 温度:55℃ | 功耗:42.1W | 内存:37.5% | 显卡:18.0%
@@ -37,12 +37,14 @@ PawnIO 硬件访问需要管理员权限。手动启动主程序时会请求提�
 | --- | --- |
 | 处理器 | Windows PDH `% Processor Time`，逻辑处理器平均忙碌时间；必要时回退 `GetSystemTimes`。 |
 | 频率 | Windows `Processor Frequency × % Processor Performance` 估算 GHz；回退 `CallNtPowerInformation`。不是每个核心的瞬时有效时钟。 |
-| 温度 | PawnIO 官方签名 IntelMSR 模块，只读 MSR；优先 CPU 封装温度，硬件不支持时回退首个核心温度。 |
-| 功耗 | 同一 Intel CPU 封装的 RAPL 能量计数器增量除以实际采样时间，单位 W；不是整机插座功耗。 |
+| 温度 | Intel：PawnIO IntelMSR 模块，优先封装温度，回退首个核心温度。AMD Zen：PawnIO AMDFamily17 模块读取 SMN 温度，处理温度范围标志及早期 Ryzen / Threadripper 的 Tctl 偏移，显示 Tdie 或无偏移机型的 Tctl/Tdie。 |
+| 功耗 | Intel RAPL / AMD Package Energy 能量计数器增量除以实际采样时间，单位 W；读取硬件能量单位，处理 32 位回绕。表示首个 CPU 封装的功耗，不是整机插座功耗，也不是所有插槽之和。 |
 | 内存 | `GlobalMemoryStatusEx` 的已用物理内存 / 总物理内存。 |
 | 显卡 | Windows GPU Engine 计数器；先汇总同一物理引擎的各进程负载，再取所有显卡中最繁忙的引擎，范围 0–100%。 |
 
-温度和功耗使用 PawnIO；内存和 GPU 占用属于操作系统统计，使用 Windows 原生接口。此版本硬件传感器实现面向支持相关 MSR 的 Intel CPU，已在 i5-12600KF 实测；不支持的 CPU、缺少模块、权限不足或计数器不可用时显示 `--`，不会用 0 冒充有效数据。AMD 温度/功耗尚未实现。显卡占用要求驱动提供 Windows GPU Engine 计数器。
+温度和功耗使用 PawnIO；内存和 GPU 占用属于操作系统统计，使用 Windows 原生接口。程序通过 CPUID 自动选择 Intel 或 AMD 模块。AMD 支持范围与官方模块一致，为 Family 17h–1Ah（Zen 系列，包含 Ryzen AI 9 HX 370 所在的 Family 1Ah）；不包含更早的 FX / A 系列。不同机型和固件仍需提供对应寄存器，部分机型可能只能读到其中一项；读取失败、缺少模块或权限不足时显示 `--`，不会用 0 冒充有效数据。AMD 的 SMN 读取使用共享 PCI 互斥锁；温度读取超时不会阻止功耗采样。显卡占用要求驱动提供 Windows GPU Engine 计数器。
+
+Intel 读取路径此前已在 i5-12600KF 实测。AMD 新增路径通过寄存器换算、型号偏移及能量回绕的自动测试，并在 Ryzen AI 9 HX 370（Family 1Ah / Model 24h）上读取到真实温度和封装功耗。其他 AMD 机型仍需在安装 PawnIO 后以管理员权限运行验证脚本确认。
 
 正常运行不联网、不保存历史监控数据。支持 DPI 和显示器变化，选中的显示器断开时回退主显示器。普通置顶窗口不能保证覆盖独占全屏游戏、锁屏或 UAC 安全桌面。
 
@@ -54,8 +56,10 @@ package/
 ├── CpuOverlay.exe             # 主程序
 └── bin/
     └── pawnio/
-        ├── IntelMSR.bin       # 官方签名的可替换传感器模块
-        ├── IntelMSR.p         # 对应模块源代码
+        ├── IntelMSR.bin       # 官方签名 Intel 模块
+        ├── IntelMSR.p         # 对应源码
+        ├── AMDFamily17.bin    # 官方签名 AMD Zen 模块
+        ├── AMDFamily17.p      # 对应源码
         ├── COPYING
         └── README.md
 ```
@@ -71,13 +75,18 @@ package/
 ```powershell
 cd D:\Code\CpuOverlay
 .\build.ps1
+# 无需管理员权限或 PawnIO 的算法测试：
+cmake --build build --config Release --target CpuOverlaySensorTests
+ctest --test-dir build -C Release --output-on-failure
+# 无驱动环境下验证发布文件、依赖、绘图和操作系统指标：
+.\scripts\verify-release.ps1 -SkipHardware
 # 在管理员 PowerShell 中验证真实传感器：
 .\scripts\verify-release.ps1
 ```
 
 构建脚本首次从官方 GitHub 下载固定版本 PawnIO 安装器，并校验 SHA-256 和 Authenticode 签名；随后可复用缓存。模块固定为官方 0.2.11 版本，附来源、校验和及 LGPL 许可证。无需另装安装包编译器。
 
-验证脚本检查两个发布 EXE 的版本资源、英文语言、静态运行库依赖、真实六项采样与原始 MSR 计算、透明黄色横排绘图，并用仅包含系统目录的 PATH、异于 EXE 的工作目录运行发布程序。
+验证脚本检查两个发布 EXE 的版本资源、英文语言、静态运行库依赖、Intel / AMD 外置模块和内嵌模块的哈希、安装器载荷、真实六项采样与原始 MSR / SMN 计算、透明黄色横排绘图，并用仅包含系统目录的 PATH、异于 EXE 的工作目录运行发布程序。`-SkipHardware` 会明确将温度 / 功耗实测标记为跳过，不代表硬件读取验证通过。
 
 桌面集成测试：构建 `CpuOverlayProbe` 目标，运行测试窗口后按两次 Alt+F1，再点击顶部监控文字，检查焦点、穿透点击和居中位置。测试工具不发布。
 
@@ -90,7 +99,7 @@ cd D:\Code\CpuOverlay
 | `--exit` | 退出已有实例 |
 | `--enable-startup` / `--disable-startup` | 配置当前用户计划任务后退出，需管理员权限 |
 | `--no-autostart` | 本次启动不自动更新自启配置 |
-| `--diagnostics <JSON绝对路径>` | 采集四个真实样本和原始 MSR，需从管理员进程启动才能读硬件；不改自启 |
+| `--diagnostics <JSON绝对路径>` | 采集四个真实样本、CPU 厂商 / Family / Model、传感器来源、原始 MSR / SMN、能量单位和温度偏移；需从管理员进程启动才能读硬件；不改自启 |
 | `--preview <PNG绝对路径>` | 输出同一绘图路径生成的透明示例图；不改自启 |
 
 诊断退出码：0=六项数据正常，2=文件/参数错误，3=至少一项不可用。预览数字是示例数据。
@@ -99,7 +108,7 @@ cd D:\Code\CpuOverlay
 
 ## 程序属性
 
-产品 CpuOverlay，版本 1.1.0.0，CompanyName `sixunited`。
+产品 CpuOverlay，版本 1.2.0.0，CompanyName `sixunited`，Author `sclliang`。作者及版权仅保存在文件元数据，不在程序界面显示。
 
 - 主程序 FileDescription：`CPU, Memory and GPU Performance Desktop Overlay`
 - 安装器 FileDescription：`CpuOverlay Installer with PawnIO Driver Setup`
@@ -107,4 +116,4 @@ cd D:\Code\CpuOverlay
 - `Copyright (c) 2026 sixunited. Author: sclliang`
 - VERSIONINFO：English (United States)，数字版本与字符串版本一致。
 
-参考：[PawnIO 模块接口](https://github.com/namazso/PawnIO.Modules/wiki/Using-PawnIO-Modules)、[PawnIO 官方安装器](https://github.com/namazso/PawnIO.Setup)、[Windows GPU 统计口径](https://devblogs.microsoft.com/directx/gpus-in-the-task-manager/)、[Windows 服务的桌面隔离](https://learn.microsoft.com/en-us/windows/win32/services/interactive-services)。
+参考：[PawnIO 模块接口](https://github.com/namazso/PawnIO.Modules/wiki/Using-PawnIO-Modules)、[AMDFamily17 模块源码](https://github.com/namazso/PawnIO.Modules/blob/0.2.11/AMDFamily17.p)、[AMD Family 17h 寄存器参考](https://www.amd.com/content/dam/amd/en/documents/processor-tech-docs/programmer-references/56255_OSRR.pdf)、[Linux k10temp 温度范围与型号偏移](https://github.com/torvalds/linux/blob/master/drivers/hwmon/k10temp.c)、[PawnIO 官方安装器](https://github.com/namazso/PawnIO.Setup)、[Windows GPU 统计口径](https://devblogs.microsoft.com/directx/gpus-in-the-task-manager/)、[Windows 服务的桌面隔离](https://learn.microsoft.com/en-us/windows/win32/services/interactive-services)。

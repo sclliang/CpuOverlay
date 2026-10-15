@@ -1,10 +1,10 @@
-﻿param([string]$ExecutablePath, [string]$ArtifactDirectory)
+﻿param([string]$ExecutablePath, [string]$ArtifactDirectory, [switch]$SkipHardware)
 $ErrorActionPreference = 'Stop'
 $projectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $exePath = if ($ExecutablePath) { $ExecutablePath } else { Join-Path $projectRoot 'package\CpuOverlay.exe' }
 $artifactPath = if ($ArtifactDirectory) { $ArtifactDirectory } else { Join-Path $projectRoot 'artifacts' }
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-if (-not ([Security.Principal.WindowsPrincipal]$identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+if (-not $SkipHardware -and -not ([Security.Principal.WindowsPrincipal]$identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Run verification in an elevated PowerShell process to read PawnIO sensors.'
 }
 New-Item -ItemType Directory -Path $artifactPath -Force | Out-Null
@@ -16,8 +16,8 @@ $fields = @{
     CompanyName = 'sixunited'
     ProductName = 'CpuOverlay'
     FileDescription = 'CPU, Memory and GPU Performance Desktop Overlay'
-    FileVersion = '1.1.0.0'
-    ProductVersion = '1.1.0.0'
+    FileVersion = '1.2.0.0'
+    ProductVersion = '1.2.0.0'
     OriginalFilename = 'CpuOverlay.exe'
     InternalName = 'CpuOverlay'
     LegalCopyright = 'Copyright (c) 2026 sixunited. Author: sclliang'
@@ -39,20 +39,39 @@ foreach ($field in $setupFields.Keys) { Assert-Condition ($setupVersion.$field -
 Assert-Condition ($setupVersion.Language -eq $version.Language) 'Installer resource language mismatch.'
 Assert-Condition ("$($setupVersion.FileMajorPart).$($setupVersion.FileMinorPart).$($setupVersion.FileBuildPart).$($setupVersion.FilePrivatePart)" -eq $fields.FileVersion) 'Installer numeric file version mismatch.'
 Assert-Condition ("$($setupVersion.ProductMajorPart).$($setupVersion.ProductMinorPart).$($setupVersion.ProductBuildPart).$($setupVersion.ProductPrivatePart)" -eq $fields.ProductVersion) 'Installer numeric product version mismatch.'
-$modulePath = Join-Path (Split-Path $exePath) 'bin\pawnio\IntelMSR.bin'
-Assert-Condition ((Get-FileHash -LiteralPath $modulePath -Algorithm SHA256).Hash -eq 'D6ED85D65AB17A22F813EF98207D6D537155EE2DED5976A21CB48413C9B92E5F') 'Signed PawnIO module hash mismatch.'
+$modules = @(
+    @{ Name = 'IntelMSR'; Hash = 'D6ED85D65AB17A22F813EF98207D6D537155EE2DED5976A21CB48413C9B92E5F'; MainId = 201; SetupId = 102; SourceId = 104 },
+    @{ Name = 'AMDFamily17'; Hash = 'DAE74615761B78BDF064DFB3E136252DDCC6FC727D88F14738D0E5800D427A91'; MainId = 202; SetupId = 108; SourceId = 109 }
+)
 Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 public static class InstallerPayload {
+    [DllImport("version", CharSet=CharSet.Unicode, SetLastError=true)] static extern uint GetFileVersionInfoSize(string path, out uint handle);
+    [DllImport("version", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool GetFileVersionInfo(string path, uint handle, uint size, byte[] data);
+    [DllImport("version", CharSet=CharSet.Unicode)] static extern bool VerQueryValue(IntPtr data, string subBlock, out IntPtr value, out uint length);
     [DllImport("kernel32", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr LoadLibraryEx(string path, IntPtr file, uint flags);
     [DllImport("kernel32", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr FindResource(IntPtr module, IntPtr name, IntPtr type);
     [DllImport("kernel32")] static extern uint SizeofResource(IntPtr module, IntPtr resource);
     [DllImport("kernel32")] static extern IntPtr LoadResource(IntPtr module, IntPtr resource);
     [DllImport("kernel32")] static extern IntPtr LockResource(IntPtr resource);
     [DllImport("kernel32")] static extern bool FreeLibrary(IntPtr module);
+    public static string Author(string path) {
+        uint unused;
+        uint size = GetFileVersionInfoSize(path, out unused);
+        if (size == 0) throw new Win32Exception();
+        var data = new byte[size];
+        if (!GetFileVersionInfo(path, 0, size, data)) throw new Win32Exception();
+        var pinned = GCHandle.Alloc(data, GCHandleType.Pinned);
+        try {
+            IntPtr value;
+            uint length;
+            if (!VerQueryValue(pinned.AddrOfPinnedObject(), @"\StringFileInfo\040904B0\Author", out value, out length)) return null;
+            return Marshal.PtrToStringUni(value);
+        } finally { pinned.Free(); }
+    }
     public static string Hash(string path, int id) {
         var module = LoadLibraryEx(path, IntPtr.Zero, 2); // Data file only: never execute the image.
         if (module == IntPtr.Zero) throw new Win32Exception();
@@ -66,9 +85,18 @@ public static class InstallerPayload {
     }
 }
 '@
+Assert-Condition ([InstallerPayload]::Author($exePath) -eq 'sclliang') 'Main executable author metadata mismatch.'
+Assert-Condition ([InstallerPayload]::Author($setupPath) -eq 'sclliang') 'Installer author metadata mismatch.'
 Assert-Condition ([InstallerPayload]::Hash($setupPath, 101) -eq (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash) 'Installer contains a stale main executable.'
 Assert-Condition ([InstallerPayload]::Hash($setupPath, 106) -eq '1F519A22E47187F70A1379A48CA604981C4FCF694F4E65B734AAA74A9FBA3032') 'Embedded official PawnIO installer hash mismatch.'
-Assert-Condition ([InstallerPayload]::Hash($exePath, 201) -eq (Get-FileHash -LiteralPath $modulePath -Algorithm SHA256).Hash) 'Embedded fallback module differs from official signed module.'
+foreach ($module in $modules) {
+    $modulePath = Join-Path (Split-Path $exePath) "bin\pawnio\$($module.Name).bin"
+    $sourcePath = Join-Path (Split-Path $exePath) "bin\pawnio\$($module.Name).p"
+    Assert-Condition ((Get-FileHash -LiteralPath $modulePath -Algorithm SHA256).Hash -eq $module.Hash) "$($module.Name) signed module hash mismatch."
+    Assert-Condition ([InstallerPayload]::Hash($exePath, $module.MainId) -eq $module.Hash) "$($module.Name) embedded fallback mismatch."
+    Assert-Condition ([InstallerPayload]::Hash($setupPath, $module.SetupId) -eq $module.Hash) "$($module.Name) installer payload mismatch."
+    Assert-Condition ([InstallerPayload]::Hash($setupPath, $module.SourceId) -eq (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash) "$($module.Name) installer source mismatch."
+}
 
 $jsonPath = Join-Path $artifactPath 'diagnostics.json'
 $pngPath = Join-Path $artifactPath 'preview.png'
@@ -77,29 +105,48 @@ try {
     $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
     $diagnosticProcess = Start-Process -FilePath $exePath -ArgumentList "--diagnostics `"$jsonPath`"" -WorkingDirectory $env:TEMP -WindowStyle Hidden -PassThru
     Assert-Condition ($diagnosticProcess.WaitForExit(20000)) 'Diagnostics timed out.'
-    Assert-Condition ($diagnosticProcess.ExitCode -eq 0) "Diagnostics failed: $($diagnosticProcess.ExitCode)"
+    Assert-Condition ($diagnosticProcess.ExitCode -eq 0 -or ($SkipHardware -and $diagnosticProcess.ExitCode -eq 3)) "Diagnostics failed: $($diagnosticProcess.ExitCode)"
     $previewProcess = Start-Process -FilePath $exePath -ArgumentList "--preview `"$pngPath`"" -WorkingDirectory $env:TEMP -WindowStyle Hidden -PassThru
     Assert-Condition ($previewProcess.WaitForExit(10000)) 'Preview timed out.'
     Assert-Condition ($previewProcess.ExitCode -eq 0) 'Preview failed.'
 } finally { $env:PATH = $savedPath }
 
 $diagnostics = Get-Content -LiteralPath $jsonPath -Raw | ConvertFrom-Json
-Assert-Condition $diagnostics.elevated 'Diagnostics did not inherit administrator access.'
+if (-not $SkipHardware) { Assert-Condition $diagnostics.elevated 'Diagnostics did not inherit administrator access.' }
 $samples = $diagnostics.samples
 Assert-Condition ($samples.Count -eq 4) 'Expected four real-time samples.'
 $previous = $null
 foreach ($sample in $samples) {
     Assert-Condition ($null -ne $sample.cpu_percent -and $sample.cpu_percent -ge 0 -and $sample.cpu_percent -le 100) 'Invalid CPU usage.'
     Assert-Condition ($null -ne $sample.frequency_ghz -and $sample.frequency_ghz -gt 0 -and $sample.frequency_ghz -lt 20) 'Invalid CPU frequency.'
-    Assert-Condition ($sample.pawnio_status -eq 'ready' -and $sample.pawnio_hresult -eq '0x0') 'PawnIO sensors unavailable.'
-    Assert-Condition ($null -ne $sample.cpu_temperature_c -and $sample.cpu_temperature_c -ge -30 -and $sample.cpu_temperature_c -le 150) 'Invalid CPU temperature.'
-    $temperature = $sample.tj_max_c - (([long]$sample.thermal_msr_raw -shr 16) -band 127)
-    Assert-Condition ([math]::Abs($temperature - $sample.cpu_temperature_c) -lt 0.001) 'Thermal MSR conversion mismatch.'
-    Assert-Condition ($null -ne $sample.cpu_package_watts -and $sample.cpu_package_watts -ge 0 -and $sample.cpu_package_watts -lt 2000) 'Invalid package power.'
-    if ($previous) {
-        $delta = ([long]$sample.energy_counter_raw - [long]$previous.energy_counter_raw + 4294967296) % 4294967296
-        $power = $delta * $sample.energy_unit_j / $sample.power_interval_s
-        Assert-Condition ([math]::Abs($power - $sample.cpu_package_watts) -lt 0.01) 'RAPL delta or sampling time mismatch.'
+    if (-not $SkipHardware) {
+        Assert-Condition ($sample.pawnio_status -eq 'ready' -and $sample.pawnio_hresult -eq '0x0') 'PawnIO sensors unavailable.'
+        Assert-Condition ($null -ne $sample.cpu_temperature_c -and $sample.cpu_temperature_c -ge -30 -and $sample.cpu_temperature_c -le 150) 'Invalid CPU temperature.'
+        switch ($sample.cpu_sensor_source) {
+            'pawnio_intel_msr' {
+                Assert-Condition ($sample.cpu_vendor -eq 'GenuineIntel' -and $sample.power_source -eq 'intel_rapl') 'Intel sensor source mismatch.'
+                $temperature = $sample.tj_max_c - (([long]$sample.thermal_msr_raw -shr 16) -band 127)
+            }
+            'pawnio_amd_family17' {
+                Assert-Condition ($sample.cpu_vendor -eq 'AuthenticAMD' -and $sample.power_source -eq 'amd_package_energy') 'AMD sensor source mismatch.'
+                Assert-Condition ($sample.cpu_family -ge 0x17 -and $sample.cpu_family -le 0x1a) 'Unsupported AMD CPU family.'
+                $raw = [long]$sample.thermal_smn_raw
+                Assert-Condition ($raw -gt 0 -and $raw -lt 4294967295) 'Invalid AMD thermal register.'
+                $temperature = ($raw -shr 21) * 0.125 - $sample.amd_tctl_offset_c
+                if (($raw -band 0x80000) -ne 0 -or ($raw -band 0x30000) -eq 0x30000) { $temperature -= 49 }
+            }
+            default { throw "Unexpected sensor source: $($sample.cpu_sensor_source)" }
+        }
+        Assert-Condition ([math]::Abs($temperature - $sample.cpu_temperature_c) -lt 0.001) 'Thermal register conversion mismatch.'
+        $unit = [math]::Pow(0.5, (([long]$sample.energy_unit_raw -shr 8) -band 31))
+        Assert-Condition ([math]::Abs($unit - $sample.energy_unit_j) -lt 1e-14) 'Energy unit conversion mismatch.'
+        Assert-Condition ($sample.power_interval_s -ge 0.05 -and $sample.power_interval_s -lt 10) 'Invalid power sampling interval.'
+        Assert-Condition ($null -ne $sample.cpu_package_watts -and $sample.cpu_package_watts -ge 0 -and $sample.cpu_package_watts -lt 2000) 'Invalid package power.'
+        if ($previous) {
+            $delta = ([long]$sample.energy_counter_raw - [long]$previous.energy_counter_raw + 4294967296) % 4294967296
+            $power = $delta * $sample.energy_unit_j / $sample.power_interval_s
+            Assert-Condition ([math]::Abs($power - $sample.cpu_package_watts) -lt 0.01) 'Energy delta or sampling time mismatch.'
+        }
     }
     Assert-Condition ($sample.memory_total_bytes -gt 0 -and $sample.memory_used_bytes -ge 0 -and $sample.memory_used_bytes -le $sample.memory_total_bytes) 'Invalid physical memory counters.'
     $memory = 100.0 * $sample.memory_used_bytes / $sample.memory_total_bytes
@@ -145,7 +192,10 @@ $report = [ordered]@{
     executable_bytes = (Get-Item -LiteralPath $exePath).Length
     sha256 = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash
     clean_path_and_foreign_working_directory = 'PASS'
-    six_metrics_and_raw_sensor_math = 'PASS'
+    os_metrics = 'PASS'
+    hardware_sensors_and_raw_math = if ($SkipHardware) { 'SKIPPED: rerun elevated with PawnIO installed' } else { 'PASS' }
+    cpu_sensor_source = $samples[0].cpu_sensor_source
+    pawnio_status = $samples[0].pawnio_status
     pawnio_module_hash = 'PASS'
     transparent_horizontal_yellow_render = 'PASS'
     dll_dependencies = $dlls

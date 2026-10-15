@@ -5,10 +5,11 @@ LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
 1 ICON "CpuOverlay.ico"
 1 RT_MANIFEST "CpuOverlay.manifest"
 201 RCDATA "IntelMSR.bin"
+202 RCDATA "AMDFamily17.bin"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 1,1,0,0
- PRODUCTVERSION 1,1,0,0
+ FILEVERSION 1,2,0,0
+ PRODUCTVERSION 1,2,0,0
  FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
  FILEFLAGS 0x0L
  FILEOS VOS_NT_WINDOWS32
@@ -20,13 +21,14 @@ BEGIN
   BLOCK "040904B0"
   BEGIN
    VALUE "CompanyName", "sixunited\0"
+   VALUE "Author", "sclliang\0"
    VALUE "FileDescription", "CPU, Memory and GPU Performance Desktop Overlay\0"
-   VALUE "FileVersion", "1.1.0.0\0"
+   VALUE "FileVersion", "1.2.0.0\0"
    VALUE "InternalName", "CpuOverlay\0"
    VALUE "LegalCopyright", "Copyright (c) 2026 sixunited. Author: sclliang\0"
    VALUE "OriginalFilename", "CpuOverlay.exe\0"
    VALUE "ProductName", "CpuOverlay\0"
-   VALUE "ProductVersion", "1.1.0.0\0"
+   VALUE "ProductVersion", "1.2.0.0\0"
   END
  END
  BLOCK "VarFileInfo"

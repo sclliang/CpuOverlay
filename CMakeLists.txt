@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(CpuOverlay VERSION 1.1.0.0 LANGUAGES CXX RC)
+project(CpuOverlay VERSION 1.2.0.0 LANGUAGES CXX RC)
 
 if(NOT WIN32 OR NOT MSVC)
   message(FATAL_ERROR "Build CpuOverlay with MSVC on Windows.")
@@ -23,6 +23,8 @@ add_custom_command(TARGET CpuOverlay POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "${CMAKE_SOURCE_DIR}/third_party/pawnio/IntelMSR.bin"
     "${CMAKE_SOURCE_DIR}/third_party/pawnio/IntelMSR.p"
+    "${CMAKE_SOURCE_DIR}/third_party/pawnio/AMDFamily17.bin"
+    "${CMAKE_SOURCE_DIR}/third_party/pawnio/AMDFamily17.p"
     "${CMAKE_SOURCE_DIR}/third_party/pawnio/COPYING"
     "${CMAKE_SOURCE_DIR}/third_party/pawnio/README.md"
     "$<TARGET_FILE_DIR:CpuOverlay>/bin/pawnio")
@@ -34,6 +36,15 @@ target_compile_definitions(CpuOverlayProbe PRIVATE UNICODE _UNICODE NOMINMAX WIN
 target_compile_options(CpuOverlayProbe PRIVATE /W4 /utf-8 /EHsc)
 set_property(TARGET CpuOverlayProbe PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 target_link_libraries(CpuOverlayProbe PRIVATE user32 gdi32)
+
+# Hardware-independent checks for CPU selection, temperature conversion and power.
+enable_testing()
+add_executable(CpuOverlaySensorTests EXCLUDE_FROM_ALL tests/sensor_math_tests.cpp tests/sensor_tests.rc)
+target_include_directories(CpuOverlaySensorTests PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_compile_features(CpuOverlaySensorTests PRIVATE cxx_std_17)
+target_compile_options(CpuOverlaySensorTests PRIVATE /W4 /permissive- /utf-8 /EHsc)
+set_property(TARGET CpuOverlaySensorTests PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+add_test(NAME CpuOverlaySensorTests COMMAND CpuOverlaySensorTests)
 
 configure_file(installer/payload.rc.in "${CMAKE_BINARY_DIR}/payload.rc.in" @ONLY)
 file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/payload-$<CONFIG>.rc" INPUT "${CMAKE_BINARY_DIR}/payload.rc.in")

@@ -1,3 +1,5 @@
 # Preserve upstream module source and signed binary byte-for-byte.
 third_party/pawnio/IntelMSR.p -text -whitespace
 third_party/pawnio/IntelMSR.bin binary
+third_party/pawnio/AMDFamily17.p -text -whitespace
+third_party/pawnio/AMDFamily17.bin binary

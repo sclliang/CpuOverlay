@@ -95,7 +95,7 @@ int WriteDiagnostics(const wchar_t* path) {
     if (!file) return 2;
     CpuSampler sampler;
     sampler.Prime();
-    file << "{\n  \"version\": \"1.1.0.0\",\n  \"elevated\": " << (IsElevated() ? "true" : "false")
+    file << "{\n  \"version\": \"1.2.0.0\",\n  \"elevated\": " << (IsElevated() ? "true" : "false")
          << ",\n  \"sample_interval_ms\": 1000,\n  \"samples\": [\n";
     bool valid = true;
     for (int i = 0; i < 4; ++i) {
@@ -120,13 +120,19 @@ int WriteDiagnostics(const wchar_t* path) {
         file << ", \"memory_used_bytes\": " << sample.memoryUsedBytes << ", \"memory_total_bytes\": " << sample.memoryTotalBytes
              << ", \"gpu_engine_count\": " << sample.gpuEngineCount
              << ", \"usage_source\": \"" << sample.usageSource << "\", \"frequency_source\": \"" << sample.frequencySource
-             << "\", \"cpu_sensor_source\": \"pawnio_intel_msr\", \"memory_source\": \"GlobalMemoryStatusEx\", \"gpu_source\": \"windows_gpu_engine\""
+             << "\", \"cpu_sensor_source\": \"" << sample.hardware.sensorSource
+             << "\", \"cpu_vendor\": \"" << sample.hardware.cpuVendor << "\", \"cpu_family\": " << sample.hardware.cpuFamily
+             << ", \"cpu_model\": " << sample.hardware.cpuModel
+             << ", \"temperature_source\": \"" << sample.hardware.temperatureSource << "\", \"power_source\": \"" << sample.hardware.powerSource
+             << "\", \"memory_source\": \"GlobalMemoryStatusEx\", \"gpu_source\": \"windows_gpu_engine\""
              << ", \"pawnio_status\": \"" << sample.hardware.status << "\", \"pawnio_hresult\": \"0x" << std::hex
              // Module origin helps verify both portable and logon startup contexts.
              << static_cast<DWORD>(sample.hardware.error) << std::dec << "\", \"pawnio_module_source\": \"" << sample.hardware.moduleSource
              << "\", \"thermal_msr_raw\": " << sample.hardware.thermalRaw
+             << ", \"thermal_smn_raw\": " << sample.hardware.thermalSmnRaw << ", \"amd_tctl_offset_c\": " << sample.hardware.amdTctlOffsetC
              << ", \"tj_max_c\": " << sample.hardware.tjMaxC << ", \"energy_counter_raw\": " << sample.hardware.energyRaw
-             << std::setprecision(9) << ", \"energy_unit_j\": " << sample.hardware.energyUnitJoules
+             << ", \"energy_unit_raw\": " << sample.hardware.energyUnitRaw
+             << std::setprecision(15) << ", \"energy_unit_j\": " << sample.hardware.energyUnitJoules
              << ", \"power_interval_s\": " << sample.hardware.intervalSeconds << "}";
     }
     file << "\n  ]\n}\n";
@@ -379,22 +385,21 @@ private:
         } else if (selected == RetryHotkey) RegisterShortcut();
         else if (selected == About) {
             MessageBoxW(nullptr,
-                L"CpuOverlay 1.1.0.0\n\n"
+                L"CpuOverlay 1.2.0.0\n\n"
                 L"Alt+F1：显示 / 隐藏；单击托盘图标也可切换。\n"
                 L"右键托盘图标：位置、字号、显示器、自启与退出。\n"
                 L"背景透明、鼠标穿透、置顶，不抢键盘焦点。\n"
                 L"每秒更新；隐藏后暂停采样。\n\n"
                 L"处理器：所有逻辑处理器的平均忙碌时间占比。\n"
                 L"频率：Windows 性能计数器估算频率。\n"
-                L"温度 / 功耗：PawnIO 读取 Intel CPU 温度及封装功耗。\n"
+                L"温度 / 功耗：支持 Intel 和 AMD Zen 系列 CPU。\n"
                 L"内存：物理内存使用百分比。\n"
                 L"显卡：Windows GPU 引擎统计中最繁忙的引擎占用。\n"
                 L"各核心频率可能不同，读数可能与任务管理器不同。\n"
                 L"普通置顶窗口不能保证覆盖独占全屏游戏或安全桌面。\n\n"
                 L"硬件传感器需要已安装 PawnIO 及管理员权限。\n"
                 L"登录自启使用当前用户的最高权限计划任务；可在托盘中取消。\n"
-                L"删除程序前请先取消自启并退出。\n\n"
-                L"Copyright (c) 2026 sixunited. Author: sclliang",
+                L"删除程序前请先取消自启并退出。",
                 L"关于 CpuOverlay", MB_OK | MB_ICONINFORMATION);
         } else if (selected >= Corner && selected < Corner + 5) {
             corner_ = selected - Corner; WriteDword(L"Corner", corner_); if (visible_) Render();
