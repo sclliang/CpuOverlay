@@ -14,6 +14,7 @@ struct CpuSample {
     PawnSample hardware;
     const char* frequencySource = "unavailable";
     const char* usageSource = "unavailable";
+    std::optional<double> energyMeterMilliwatts;
 };
 
 class CpuSampler {
@@ -34,6 +35,7 @@ private:
     PDH_HCOUNTER performance_ = nullptr;
     PDH_HCOUNTER frequency_ = nullptr;
     PDH_HCOUNTER gpu_ = nullptr;
+    PDH_HCOUNTER packagePower_ = nullptr;
     PawnSensors pawn_;
     ULONGLONG idle_ = 0, total_ = 0;
     bool haveTimes_ = false;

@@ -65,10 +65,20 @@ std::filesystem::path InstallationDirectory() {
     }
     return result;
 }
-std::filesystem::path ModulePath(bool amd) {
+struct SensorModule { const wchar_t* filename; WORD resource; const char* source; };
+SensorModule ModuleForCpu(bool amd, uint32_t family) {
+    if (!amd) return {L"IntelMSR.bin", 201, "pawnio_intel_msr"};
+    switch (SensorMath::SelectAmdBackend(family)) {
+    case SensorMath::AmdBackend::K8: return {L"AMDFamily0F.bin", 203, "pawnio_amd_family0f"};
+    case SensorMath::AmdBackend::Family10: return {L"AMDFamily10.bin", 204, "pawnio_amd_family10"};
+    case SensorMath::AmdBackend::Zen: return {L"AMDFamily17.bin", 202, "pawnio_amd_family17"};
+    default: return {L"", 0, "unavailable"};
+    }
+}
+std::filesystem::path ModulePath(const wchar_t* filename) {
     wchar_t path[32768]{};
     if (!GetModuleFileNameW(nullptr, path, ARRAYSIZE(path))) return {};
-    return std::filesystem::path(path).parent_path() / L"bin" / L"pawnio" / (amd ? L"AMDFamily17.bin" : L"IntelMSR.bin");
+    return std::filesystem::path(path).parent_path() / L"bin" / L"pawnio" / filename;
 }
 }
 
@@ -88,13 +98,22 @@ PawnSensors::PawnSensors() {
     if (amd_) {
         char brand[49]{};
         __cpuid(data, static_cast<int>(0x80000000u));
-        if (static_cast<uint32_t>(data[0]) >= 0x80000004u) {
+        const auto extendedMax = static_cast<uint32_t>(data[0]);
+        if (extendedMax >= 0x80000004u) {
             for (uint32_t i = 0; i < 3; ++i) {
                 __cpuid(data, static_cast<int>(0x80000002u + i));
                 std::memcpy(brand + i * 16, data, 16);
             }
         }
         amdTctlOffsetC_ = SensorMath::AmdTctlOffset(cpuFamily_, brand);
+        if (cpuFamily_ == 0x0f && extendedMax >= 0x80000007u) {
+            __cpuid(data, static_cast<int>(0x80000007u));
+            k8Thermal_ = (data[3] & 1) != 0;
+            if (extendedMax >= 0x80000008u) {
+                __cpuid(data, static_cast<int>(0x80000008u));
+                k8CoreCount_ = (data[2] & 0xff) == 0 ? 1 : 2;
+            }
+        }
     }
     Open();
 }
@@ -123,7 +142,8 @@ bool PawnSensors::Open() {
     close_ = Resolve<CloseFn>(library_, "pawnio_close");
     if (!open || !load || !execute_ || !close_) { status_ = "pawnio_api_unavailable"; error_ = E_NOINTERFACE; return false; }
     // Preserve the exact Windows error when the external signed module cannot be read.
-    const auto path = ModulePath(amd_);
+    const auto selected = ModuleForCpu(amd_, cpuFamily_);
+    const auto path = ModulePath(selected.filename);
     HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     std::vector<UCHAR> module;
     if (file == INVALID_HANDLE_VALUE) {
@@ -133,7 +153,7 @@ bool PawnSensors::Open() {
         }
         // Keep the identical signed module in the EXE for logon contexts where the
         // external module is unavailable. An external module always takes priority.
-        HRSRC resource = FindResourceW(nullptr, MAKEINTRESOURCEW(amd_ ? 202 : 201), RT_RCDATA);
+        HRSRC resource = FindResourceW(nullptr, MAKEINTRESOURCEW(selected.resource), RT_RCDATA);
         const DWORD bytes = resource ? SizeofResource(nullptr, resource) : 0;
         HGLOBAL loaded = resource ? LoadResource(nullptr, resource) : nullptr;
         const auto data = loaded ? static_cast<const UCHAR*>(LockResource(loaded)) : nullptr;
@@ -171,23 +191,27 @@ bool PawnSensors::Open() {
     return true;
 }
 
-bool PawnSensors::ReadRegister(const char* function, uint32_t index, uint64_t& value) {
-    const ULONG64 input = index;
+bool PawnSensors::ExecuteRead(const char* function, const ULONG64* input, SIZE_T size, uint64_t& value) {
     ULONG64 output = 0;
     SIZE_T count = 0;
-    const HRESULT result = execute_(handle_, function, &input, 1, &output, 1, &count);
+    const HRESULT result = execute_(handle_, function, input, size, &output, 1, &count);
     if (FAILED(result) || count != 1) { error_ = FAILED(result) ? result : E_FAIL; return false; }
     value = output;
     return true;
+}
+
+bool PawnSensors::ReadRegister(const char* function, uint32_t index, uint64_t& value) {
+    const ULONG64 input = index;
+    return ExecuteRead(function, &input, 1, value);
 }
 
 bool PawnSensors::ReadMsr(uint32_t index, uint64_t& value) {
     return ReadRegister("ioctl_read_msr", index, value);
 }
 
-bool PawnSensors::ReadSmn(uint32_t index, uint32_t& value) {
-    // AMDFamily17 requires the shared Access_PCI mutex across the entire SMN
-    // index/data transaction. Coordinate with HWiNFO, LHM and other monitors.
+bool PawnSensors::ReadPci(const char* function, const ULONG64* input, SIZE_T size, uint32_t& value) {
+    // Hold the shared mutex across every PCI selector/read transaction, including
+    // K8 core selection and legacy SMU. Coordinate with other hardware monitors.
     if (!pciMutex_) {
         PSECURITY_DESCRIPTOR descriptor = nullptr;
         if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x00100001;;;WD)",
@@ -203,14 +227,51 @@ bool PawnSensors::ReadSmn(uint32_t index, uint32_t& value) {
     PciBusLock lock(pciMutex_);
     if (!lock.Owned()) { error_ = lock.Error(); return false; }
     uint64_t raw = 0;
-    if (!ReadRegister("ioctl_read_smn", index, raw)) return false;
+    if (!ExecuteRead(function, input, size, raw)) return false;
     value = static_cast<uint32_t>(raw);
     return true;
+}
+
+void PawnSensors::ReadAmdTemperature(PawnSample& sample) {
+    switch (SensorMath::SelectAmdBackend(cpuFamily_)) {
+    case SensorMath::AmdBackend::K8:
+        sample.temperatureSource = "amd_k8_core_max";
+        if (!k8Thermal_) { error_ = HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED); return; }
+        for (uint32_t core = 0; core < k8CoreCount_; ++core) {
+            const ULONG64 input[]{0, core}; // First physical package, up to two K8 cores.
+            uint32_t raw = 0;
+            if (!ReadPci("ioctl_get_thermtrip", input, ARRAYSIZE(input), raw)) continue;
+            const auto temperature = SensorMath::AmdK8Temperature(raw, cpuModel_);
+            if (temperature && (!sample.temperatureC || *temperature > *sample.temperatureC)) {
+                sample.temperatureC = temperature; sample.thermalLegacyRaw = raw; sample.thermalCoreIndex = core;
+            }
+        }
+        break;
+    case SensorMath::AmdBackend::Family10: {
+        sample.temperatureSource = "amd_legacy_tctl";
+        const bool smu = SensorMath::AmdUsesSmuTemperature(cpuFamily_, cpuModel_);
+        const ULONG64 input[]{smu ? 0xd8200ca4ull : 0, 0xa4};
+        if (ReadPci(smu ? "ioctl_read_smu" : "ioctl_read_miscctl", input, smu ? 1 : 2, sample.thermalLegacyRaw))
+            sample.temperatureC = SensorMath::AmdLegacyTemperature(sample.thermalLegacyRaw);
+        // Never invoke frequency calibration or C-state IO in AMDFamily10.
+        break;
+    }
+    case SensorMath::AmdBackend::Zen: {
+        sample.temperatureSource = amdTctlOffsetC_ > 0 ? "amd_tdie" : "amd_tctl_tdie";
+        const ULONG64 input = kAmdThermal;
+        if (ReadPci("ioctl_read_smn", &input, 1, sample.thermalSmnRaw))
+            sample.temperatureC = SensorMath::AmdTemperature(sample.thermalSmnRaw, amdTctlOffsetC_);
+        break;
+    }
+    default: error_ = HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED); break;
+    }
+    if (!sample.temperatureC && SUCCEEDED(error_)) error_ = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
 }
 
 void PawnSensors::Prime() {
     haveEnergy_ = false;
     if (!Open()) return;
+    if (amd_ && SensorMath::SelectAmdBackend(cpuFamily_) != SensorMath::AmdBackend::Zen) return;
     CpuAffinity affinity;
     if (!affinity.Applied()) { status_ = "cpu_affinity_failed"; error_ = affinity.Error(); return; }
     uint64_t energy = 0;
@@ -228,12 +289,9 @@ PawnSample PawnSensors::Collect() {
     sample.cpuVendor = intel_ ? "GenuineIntel" : amd_ ? "AuthenticAMD" : "unknown";
     sample.cpuFamily = cpuFamily_; sample.cpuModel = cpuModel_;
     sample.amdTctlOffsetC = amdTctlOffsetC_;
-    if (intel_) {
-        sample.sensorSource = "pawnio_intel_msr"; sample.powerSource = "intel_rapl";
-    } else if (amd_ && SensorMath::SupportsAmdFamily(cpuFamily_)) {
-        sample.sensorSource = "pawnio_amd_family17"; sample.powerSource = "amd_package_energy";
-        sample.temperatureSource = amdTctlOffsetC_ > 0 ? "amd_tdie" : "amd_tctl_tdie";
-    }
+    const bool amdEnergy = amd_ && SensorMath::SelectAmdBackend(cpuFamily_) == SensorMath::AmdBackend::Zen;
+    if (intel_ || amd_) sample.sensorSource = ModuleForCpu(amd_, cpuFamily_).source;
+    sample.powerSource = intel_ ? "intel_rapl" : amdEnergy ? "amd_package_energy" : "unavailable";
     if (!handle_) return sample;
     CpuAffinity affinity;
     if (!affinity.Applied()) {
@@ -242,28 +300,23 @@ PawnSample PawnSensors::Collect() {
     error_ = S_OK;
     uint64_t target = 0, thermal = 0;
     if (amd_) {
-        if (ReadSmn(kAmdThermal, sample.thermalSmnRaw)) {
-            sample.temperatureC = SensorMath::AmdTemperature(sample.thermalSmnRaw, amdTctlOffsetC_);
-            if (!sample.temperatureC) error_ = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
-        }
+        ReadAmdTemperature(sample);
     } else if (ReadMsr(kThermalTarget, target)) {
         const double tjMax = static_cast<double>((target >> 16) & 0xff);
         sample.tjMaxC = tjMax;
-        bool valid = packageThermal_ && ReadMsr(kPackageThermal, thermal) && (thermal & (1ull << 31));
+        bool valid = packageThermal_ && ReadMsr(kPackageThermal, thermal) && SensorMath::IntelTemperature(target, thermal).has_value();
         sample.temperatureSource = "intel_package_dts";
         if (!valid) {
-            valid = ReadMsr(kCoreThermal, thermal) && (thermal & (1ull << 31));
+            valid = ReadMsr(kCoreThermal, thermal) && SensorMath::IntelTemperature(target, thermal).has_value();
             sample.temperatureSource = "intel_core_dts";
         }
         sample.thermalRaw = thermal;
-        if (valid && tjMax >= 50 && tjMax <= 125) {
-            const double temperature = tjMax - static_cast<double>((thermal >> 16) & 0x7f);
-            if (temperature >= -30 && temperature <= 150) sample.temperatureC = temperature;
-        }
+        if (valid) sample.temperatureC = SensorMath::IntelTemperature(target, thermal);
+        else if (SUCCEEDED(error_)) error_ = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
     }
     uint64_t unit = 0, energy = 0;
     // A failed/contended temperature read must not suppress package power.
-    if (ReadMsr(amd_ ? kAmdPowerUnit : kRaplUnit, unit) && ReadMsr(amd_ ? kAmdPackageEnergy : kPackageEnergy, energy)) {
+    if ((intel_ || amdEnergy) && ReadMsr(amdEnergy ? kAmdPowerUnit : kRaplUnit, unit) && ReadMsr(amdEnergy ? kAmdPackageEnergy : kPackageEnergy, energy)) {
         LARGE_INTEGER now{};
         QueryPerformanceCounter(&now);
         sample.energyRaw = static_cast<uint32_t>(energy);

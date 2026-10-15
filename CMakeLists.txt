@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(CpuOverlay VERSION 1.2.0.0 LANGUAGES CXX RC)
+project(CpuOverlay VERSION 1.3.0.0 LANGUAGES CXX RC)
 
 if(NOT WIN32 OR NOT MSVC)
   message(FATAL_ERROR "Build CpuOverlay with MSVC on Windows.")
@@ -18,16 +18,21 @@ target_link_options(CpuOverlay PRIVATE /MANIFEST:NO)
 set_target_properties(CpuOverlay PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_SOURCE_DIR}/package"
   RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_SOURCE_DIR}/package")
-add_custom_command(TARGET CpuOverlay POST_BUILD
+add_custom_target(CpuOverlayModules
   COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:CpuOverlay>/bin/pawnio"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "${CMAKE_SOURCE_DIR}/third_party/pawnio/IntelMSR.bin"
     "${CMAKE_SOURCE_DIR}/third_party/pawnio/IntelMSR.p"
     "${CMAKE_SOURCE_DIR}/third_party/pawnio/AMDFamily17.bin"
     "${CMAKE_SOURCE_DIR}/third_party/pawnio/AMDFamily17.p"
+    "${CMAKE_SOURCE_DIR}/third_party/pawnio/AMDFamily0F.bin"
+    "${CMAKE_SOURCE_DIR}/third_party/pawnio/AMDFamily0F.p"
+    "${CMAKE_SOURCE_DIR}/third_party/pawnio/AMDFamily10.bin"
+    "${CMAKE_SOURCE_DIR}/third_party/pawnio/AMDFamily10.p"
     "${CMAKE_SOURCE_DIR}/third_party/pawnio/COPYING"
     "${CMAKE_SOURCE_DIR}/third_party/pawnio/README.md"
     "$<TARGET_FILE_DIR:CpuOverlay>/bin/pawnio")
+add_dependencies(CpuOverlay CpuOverlayModules)
 
 # Optional desktop integration fixture. Never distributed in package/.
 add_executable(CpuOverlayProbe EXCLUDE_FROM_ALL WIN32 tests/ui_probe.cpp)

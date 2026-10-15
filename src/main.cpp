@@ -95,7 +95,7 @@ int WriteDiagnostics(const wchar_t* path) {
     if (!file) return 2;
     CpuSampler sampler;
     sampler.Prime();
-    file << "{\n  \"version\": \"1.2.0.0\",\n  \"elevated\": " << (IsElevated() ? "true" : "false")
+    file << "{\n  \"version\": \"1.3.0.0\",\n  \"elevated\": " << (IsElevated() ? "true" : "false")
          << ",\n  \"sample_interval_ms\": 1000,\n  \"samples\": [\n";
     bool valid = true;
     for (int i = 0; i < 4; ++i) {
@@ -115,6 +115,8 @@ int WriteDiagnostics(const wchar_t* path) {
         };
         number("cpu_temperature_c", sample.hardware.temperatureC);
         number("cpu_package_watts", sample.hardware.packageWatts);
+        file << ", \"energy_meter_milliwatts\": ";
+        if (sample.energyMeterMilliwatts) file << *sample.energyMeterMilliwatts; else file << "null";
         number("memory_percent", sample.memoryPercent);
         number("gpu_percent", sample.gpuPercent);
         file << ", \"memory_used_bytes\": " << sample.memoryUsedBytes << ", \"memory_total_bytes\": " << sample.memoryTotalBytes
@@ -130,6 +132,7 @@ int WriteDiagnostics(const wchar_t* path) {
              << static_cast<DWORD>(sample.hardware.error) << std::dec << "\", \"pawnio_module_source\": \"" << sample.hardware.moduleSource
              << "\", \"thermal_msr_raw\": " << sample.hardware.thermalRaw
              << ", \"thermal_smn_raw\": " << sample.hardware.thermalSmnRaw << ", \"amd_tctl_offset_c\": " << sample.hardware.amdTctlOffsetC
+             << ", \"thermal_legacy_raw\": " << sample.hardware.thermalLegacyRaw << ", \"thermal_core_index\": " << sample.hardware.thermalCoreIndex
              << ", \"tj_max_c\": " << sample.hardware.tjMaxC << ", \"energy_counter_raw\": " << sample.hardware.energyRaw
              << ", \"energy_unit_raw\": " << sample.hardware.energyUnitRaw
              << std::setprecision(15) << ", \"energy_unit_j\": " << sample.hardware.energyUnitJoules
@@ -385,7 +388,7 @@ private:
         } else if (selected == RetryHotkey) RegisterShortcut();
         else if (selected == About) {
             MessageBoxW(nullptr,
-                L"CpuOverlay 1.2.0.0\n\n"
+                L"CpuOverlay 1.3.0.0\n\n"
                 L"Alt+F1：显示 / 隐藏；单击托盘图标也可切换。\n"
                 L"右键托盘图标：位置、字号、显示器、自启与退出。\n"
                 L"背景透明、鼠标穿透、置顶，不抢键盘焦点。\n"

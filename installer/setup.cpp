@@ -172,7 +172,7 @@ void Report(const Options& options, const Outcome& outcome) {
     if (options.uninstall && options.report.empty()) return;
     std::error_code error; fs::create_directories(path.parent_path(), error);
     std::ofstream file(path);
-    file << "{\n  \"version\": \"1.2.0.0\",\n  \"success\": " << (outcome.success ? "true" : "false")
+    file << "{\n  \"version\": \"1.3.0.0\",\n  \"success\": " << (outcome.success ? "true" : "false")
         << ",\n  \"target\": \"" << Json(options.target.wstring()) << "\",\n  \"pawnio_was_present\": " << (outcome.pawnPresent ? "true" : "false")
         << ",\n  \"pawnio_installed_now\": " << (outcome.pawnInstalled ? "true" : "false")
         << ",\n  \"error\": \"" << Json(outcome.error) << "\"\n}\n";
@@ -187,6 +187,8 @@ void Uninstall(const Options& options) {
     if (fs::exists(main)) { Require(IsCpuOverlay(main), L"目标文件不属于 CpuOverlay。"); Require(Run(main, L"--disable-startup") == 0, L"移除登录自启失败。"); }
     const wchar_t* files[] = {L"CpuOverlay.exe", L"bin\\pawnio\\IntelMSR.bin", L"bin\\pawnio\\IntelMSR.p", L"bin\\pawnio\\COPYING",
         L"bin\\pawnio\\AMDFamily17.bin", L"bin\\pawnio\\AMDFamily17.p",
+        L"bin\\pawnio\\AMDFamily0F.bin", L"bin\\pawnio\\AMDFamily0F.p",
+        L"bin\\pawnio\\AMDFamily10.bin", L"bin\\pawnio\\AMDFamily10.p",
         L"bin\\pawnio\\README.md", L"bin\\docs\\README.md", L"bin\\install-report.json"};
     for (const auto relative : files) {
         const auto path = options.target / relative;
@@ -242,6 +244,10 @@ Outcome Perform(const Options& options, HWND progress) {
         Extract(104, options.target / L"bin" / L"pawnio" / L"IntelMSR.p");
         Extract(108, options.target / L"bin" / L"pawnio" / L"AMDFamily17.bin");
         Extract(109, options.target / L"bin" / L"pawnio" / L"AMDFamily17.p");
+        Extract(110, options.target / L"bin" / L"pawnio" / L"AMDFamily0F.bin");
+        Extract(111, options.target / L"bin" / L"pawnio" / L"AMDFamily0F.p");
+        Extract(112, options.target / L"bin" / L"pawnio" / L"AMDFamily10.bin");
+        Extract(113, options.target / L"bin" / L"pawnio" / L"AMDFamily10.p");
         Extract(105, options.target / L"bin" / L"pawnio" / L"README.md");
         Extract(107, options.target / L"bin" / L"docs" / L"README.md");
         const auto uninstall = options.target / L"bin" / L"CpuOverlay-Setup.exe";
@@ -250,7 +256,7 @@ Outcome Perform(const Options& options, HWND progress) {
         stage(75, L"正在配置快捷方式和登录自启…");
         Require(Run(main, options.startup ? L"--enable-startup" : L"--disable-startup") == 0, L"登录自启配置失败。");
         WriteRegistry(kUninstallKey, L"DisplayName", L"CpuOverlay");
-        WriteRegistry(kUninstallKey, L"DisplayVersion", L"1.2.0.0");
+        WriteRegistry(kUninstallKey, L"DisplayVersion", L"1.3.0.0");
         WriteRegistry(kUninstallKey, L"Publisher", L"sixunited");
         WriteRegistry(kUninstallKey, L"InstallLocation", options.target.wstring());
         WriteRegistry(kUninstallKey, L"DisplayIcon", main.wstring());
@@ -289,7 +295,7 @@ bool Confirm(Options& options) {
         TASKDIALOGCONFIG dialog{sizeof(dialog)};
         dialog.dwFlags = TDF_SIZE_TO_CONTENT | (options.startup ? TDF_VERIFICATION_FLAG_CHECKED : 0);
         dialog.pszWindowTitle = L"CpuOverlay 安装";
-        dialog.pszMainInstruction = L"安装 CpuOverlay 1.2.0.0";
+        dialog.pszMainInstruction = L"安装 CpuOverlay 1.3.0.0";
         dialog.pszContent = content.c_str(); dialog.pszVerificationText = L"登录 Windows 后自动运行";
         dialog.pButtons = buttons; dialog.cButtons = ARRAYSIZE(buttons); dialog.nDefaultButton = 100;
         int selected = 0; BOOL checked = FALSE;

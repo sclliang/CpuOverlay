@@ -16,8 +16,8 @@ $fields = @{
     CompanyName = 'sixunited'
     ProductName = 'CpuOverlay'
     FileDescription = 'CPU, Memory and GPU Performance Desktop Overlay'
-    FileVersion = '1.2.0.0'
-    ProductVersion = '1.2.0.0'
+    FileVersion = '1.3.0.0'
+    ProductVersion = '1.3.0.0'
     OriginalFilename = 'CpuOverlay.exe'
     InternalName = 'CpuOverlay'
     LegalCopyright = 'Copyright (c) 2026 sixunited. Author: sclliang'
@@ -41,7 +41,9 @@ Assert-Condition ("$($setupVersion.FileMajorPart).$($setupVersion.FileMinorPart)
 Assert-Condition ("$($setupVersion.ProductMajorPart).$($setupVersion.ProductMinorPart).$($setupVersion.ProductBuildPart).$($setupVersion.ProductPrivatePart)" -eq $fields.ProductVersion) 'Installer numeric product version mismatch.'
 $modules = @(
     @{ Name = 'IntelMSR'; Hash = 'D6ED85D65AB17A22F813EF98207D6D537155EE2DED5976A21CB48413C9B92E5F'; MainId = 201; SetupId = 102; SourceId = 104 },
-    @{ Name = 'AMDFamily17'; Hash = 'DAE74615761B78BDF064DFB3E136252DDCC6FC727D88F14738D0E5800D427A91'; MainId = 202; SetupId = 108; SourceId = 109 }
+    @{ Name = 'AMDFamily17'; Hash = 'DAE74615761B78BDF064DFB3E136252DDCC6FC727D88F14738D0E5800D427A91'; MainId = 202; SetupId = 108; SourceId = 109 },
+    @{ Name = 'AMDFamily0F'; Hash = 'A6E11619E87A97820705A6523714F22D676CE44F902631833D4429B89D509D55'; MainId = 203; SetupId = 110; SourceId = 111 },
+    @{ Name = 'AMDFamily10'; Hash = '6443080B2968474FFBC38AA4356CC56F9664349FA4B917AFDB33027D6BB50525'; MainId = 204; SetupId = 112; SourceId = 113 }
 )
 Add-Type -TypeDefinition @'
 using System;
@@ -89,6 +91,12 @@ Assert-Condition ([InstallerPayload]::Author($exePath) -eq 'sclliang') 'Main exe
 Assert-Condition ([InstallerPayload]::Author($setupPath) -eq 'sclliang') 'Installer author metadata mismatch.'
 Assert-Condition ([InstallerPayload]::Hash($setupPath, 101) -eq (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash) 'Installer contains a stale main executable.'
 Assert-Condition ([InstallerPayload]::Hash($setupPath, 106) -eq '1F519A22E47187F70A1379A48CA604981C4FCF694F4E65B734AAA74A9FBA3032') 'Embedded official PawnIO installer hash mismatch.'
+Assert-Condition ([InstallerPayload]::Hash($setupPath, 107) -eq (Get-FileHash -LiteralPath (Join-Path $projectRoot 'README.md')).Hash) 'Installer contains stale documentation.'
+foreach ($document in @(@{Name = 'COPYING'; Id = 103}, @{Name = 'README.md'; Id = 105})) {
+    $documentHash = (Get-FileHash -LiteralPath (Join-Path $projectRoot "third_party\pawnio\$($document.Name)")).Hash
+    Assert-Condition ([InstallerPayload]::Hash($setupPath, $document.Id) -eq $documentHash) 'Installer module documentation/license mismatch.'
+    Assert-Condition ((Get-FileHash -LiteralPath (Join-Path (Split-Path $exePath) "bin\pawnio\$($document.Name)")).Hash -eq $documentHash) 'Portable module documentation/license mismatch.'
+}
 foreach ($module in $modules) {
     $modulePath = Join-Path (Split-Path $exePath) "bin\pawnio\$($module.Name).bin"
     $sourcePath = Join-Path (Split-Path $exePath) "bin\pawnio\$($module.Name).p"
@@ -120,32 +128,54 @@ foreach ($sample in $samples) {
     Assert-Condition ($null -ne $sample.cpu_percent -and $sample.cpu_percent -ge 0 -and $sample.cpu_percent -le 100) 'Invalid CPU usage.'
     Assert-Condition ($null -ne $sample.frequency_ghz -and $sample.frequency_ghz -gt 0 -and $sample.frequency_ghz -lt 20) 'Invalid CPU frequency.'
     if (-not $SkipHardware) {
-        Assert-Condition ($sample.pawnio_status -eq 'ready' -and $sample.pawnio_hresult -eq '0x0') 'PawnIO sensors unavailable.'
+        $meterFallback = $sample.power_source -eq 'windows_energy_meter_package0'
+        Assert-Condition (($sample.pawnio_status -eq 'ready' -and $sample.pawnio_hresult -eq '0x0') -or
+            ($meterFallback -and $sample.pawnio_status -eq 'partial_sensor_data')) 'PawnIO sensors unavailable.'
         Assert-Condition ($null -ne $sample.cpu_temperature_c -and $sample.cpu_temperature_c -ge -30 -and $sample.cpu_temperature_c -le 150) 'Invalid CPU temperature.'
         switch ($sample.cpu_sensor_source) {
             'pawnio_intel_msr' {
-                Assert-Condition ($sample.cpu_vendor -eq 'GenuineIntel' -and $sample.power_source -eq 'intel_rapl') 'Intel sensor source mismatch.'
+                Assert-Condition ($sample.cpu_vendor -eq 'GenuineIntel' -and ($meterFallback -or $sample.power_source -eq 'intel_rapl')) 'Intel sensor source mismatch.'
                 $temperature = $sample.tj_max_c - (([long]$sample.thermal_msr_raw -shr 16) -band 127)
             }
             'pawnio_amd_family17' {
-                Assert-Condition ($sample.cpu_vendor -eq 'AuthenticAMD' -and $sample.power_source -eq 'amd_package_energy') 'AMD sensor source mismatch.'
+                Assert-Condition ($sample.cpu_vendor -eq 'AuthenticAMD' -and ($meterFallback -or $sample.power_source -eq 'amd_package_energy')) 'AMD sensor source mismatch.'
                 Assert-Condition ($sample.cpu_family -ge 0x17 -and $sample.cpu_family -le 0x1a) 'Unsupported AMD CPU family.'
                 $raw = [long]$sample.thermal_smn_raw
                 Assert-Condition ($raw -gt 0 -and $raw -lt 4294967295) 'Invalid AMD thermal register.'
                 $temperature = ($raw -shr 21) * 0.125 - $sample.amd_tctl_offset_c
                 if (($raw -band 0x80000) -ne 0 -or ($raw -band 0x30000) -eq 0x30000) { $temperature -= 49 }
             }
+            'pawnio_amd_family0f' {
+                Assert-Condition ($sample.cpu_vendor -eq 'AuthenticAMD' -and $sample.cpu_family -eq 0x0f) 'K8 source mismatch.'
+                $raw = [long]$sample.thermal_legacy_raw
+                Assert-Condition ($raw -gt 0 -and $raw -lt 4294967295 -and $sample.thermal_core_index -le 1) 'Invalid K8 thermal register.'
+                $temperature = (($raw -shr 16) -band 255) - 49
+                if ($sample.cpu_model -ge 0x69 -and $sample.cpu_model -notin @(0xc1, 0x6c, 0x7c)) { $temperature += 21 }
+            }
+            'pawnio_amd_family10' {
+                Assert-Condition ($sample.cpu_vendor -eq 'AuthenticAMD' -and $sample.cpu_family -in @(0x10, 0x11, 0x12, 0x14, 0x15, 0x16)) 'Legacy AMD source mismatch.'
+                $raw = [long]$sample.thermal_legacy_raw
+                Assert-Condition ($raw -gt 0 -and $raw -lt 4294967295) 'Invalid legacy AMD thermal register.'
+                $temperature = ($raw -shr 21) * 0.125
+                if (($raw -band 0x30000) -eq 0x30000) { $temperature -= 49 }
+            }
             default { throw "Unexpected sensor source: $($sample.cpu_sensor_source)" }
         }
         Assert-Condition ([math]::Abs($temperature - $sample.cpu_temperature_c) -lt 0.001) 'Thermal register conversion mismatch.'
-        $unit = [math]::Pow(0.5, (([long]$sample.energy_unit_raw -shr 8) -band 31))
-        Assert-Condition ([math]::Abs($unit - $sample.energy_unit_j) -lt 1e-14) 'Energy unit conversion mismatch.'
-        Assert-Condition ($sample.power_interval_s -ge 0.05 -and $sample.power_interval_s -lt 10) 'Invalid power sampling interval.'
         Assert-Condition ($null -ne $sample.cpu_package_watts -and $sample.cpu_package_watts -ge 0 -and $sample.cpu_package_watts -lt 2000) 'Invalid package power.'
-        if ($previous) {
-            $delta = ([long]$sample.energy_counter_raw - [long]$previous.energy_counter_raw + 4294967296) % 4294967296
-            $power = $delta * $sample.energy_unit_j / $sample.power_interval_s
-            Assert-Condition ([math]::Abs($power - $sample.cpu_package_watts) -lt 0.01) 'Energy delta or sampling time mismatch.'
+        if ($meterFallback) {
+            Assert-Condition ($null -ne $sample.energy_meter_milliwatts -and
+                [math]::Abs($sample.energy_meter_milliwatts / 1000 - $sample.cpu_package_watts) -lt 0.001) 'Windows Energy Meter conversion mismatch.'
+        } else {
+            Assert-Condition ($sample.power_source -in @('intel_rapl', 'amd_package_energy')) 'Unexpected package power source.'
+            $unit = [math]::Pow(0.5, (([long]$sample.energy_unit_raw -shr 8) -band 31))
+            Assert-Condition ([math]::Abs($unit - $sample.energy_unit_j) -lt 1e-14) 'Energy unit conversion mismatch.'
+            Assert-Condition ($sample.power_interval_s -ge 0.05 -and $sample.power_interval_s -lt 10) 'Invalid power sampling interval.'
+            if ($previous -and $previous.power_source -eq $sample.power_source) {
+                $delta = ([long]$sample.energy_counter_raw - [long]$previous.energy_counter_raw + 4294967296) % 4294967296
+                $power = $delta * $sample.energy_unit_j / $sample.power_interval_s
+                Assert-Condition ([math]::Abs($power - $sample.cpu_package_watts) -lt 0.01) 'Energy delta or sampling time mismatch.'
+            }
         }
     }
     Assert-Condition ($sample.memory_total_bytes -gt 0 -and $sample.memory_used_bytes -ge 0 -and $sample.memory_used_bytes -le $sample.memory_total_bytes) 'Invalid physical memory counters.'

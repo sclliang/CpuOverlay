@@ -1,4 +1,5 @@
 #include "cpu_sampler.h"
+#include "sensor_math.h"
 #include <pdhmsg.h>
 #include <powrprof.h>
 #include <algorithm>
@@ -39,7 +40,7 @@ CpuSampler::~CpuSampler() { if (query_) PdhCloseQuery(query_); }
 void CpuSampler::OpenCounters() {
     if (query_) PdhCloseQuery(query_);
     query_ = nullptr;
-    usage_ = performance_ = frequency_ = gpu_ = nullptr;
+    usage_ = performance_ = frequency_ = gpu_ = packagePower_ = nullptr;
     if (PdhOpenQueryW(nullptr, 0, &query_) != ERROR_SUCCESS) return;
     auto add = [this](const wchar_t* path, PDH_HCOUNTER& counter) {
         if (PdhAddEnglishCounterW(query_, path, 0, &counter) != ERROR_SUCCESS) counter = nullptr;
@@ -49,6 +50,9 @@ void CpuSampler::OpenCounters() {
     add(L"\\Processor Information(_Total)\\% Processor Performance", performance_);
     add(L"\\Processor Information(_Total)\\Processor Frequency", frequency_);
     add(L"\\GPU Engine(*)\\Utilization Percentage", gpu_);
+    // Windows EMI exports average power in milliwatts (umpoext counter help).
+    // Match package 0 exactly: no GPU/DRAM/PSys channels or multi-socket sum.
+    add(L"\\Energy Meter(rapl_package0_pkg)\\Power", packagePower_);
 }
 
 std::optional<double> CpuSampler::ReadGpuUsage(unsigned& engineCount) const {
@@ -129,6 +133,13 @@ CpuSample CpuSampler::Collect() {
     auto fallbackUsage = ReadSystemUsage();
     const bool collected = query_ && PdhCollectQueryData(query_) == ERROR_SUCCESS;
     if (collected) {
+        sample.energyMeterMilliwatts = Read(packagePower_);
+        if (!sample.hardware.packageWatts && sample.energyMeterMilliwatts) {
+            sample.hardware.packageWatts = SensorMath::EnergyMeterWatts(*sample.energyMeterMilliwatts);
+            if (sample.hardware.packageWatts) sample.hardware.powerSource = "windows_energy_meter_package0";
+            // Keep pawnio_status / HRESULT intact so diagnostics still explain
+            // why the original backend needed a fallback.
+        }
         sample.gpuPercent = ReadGpuUsage(sample.gpuEngineCount);
         sample.usagePercent = Read(usage_);
         if (sample.usagePercent && *sample.usagePercent >= 0) {
