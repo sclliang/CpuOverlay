@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(CpuOverlay VERSION 1.6.0.0 LANGUAGES CXX RC)
+project(CpuOverlay VERSION 1.7.0.0 LANGUAGES CXX RC)
 
 if(NOT WIN32 OR NOT MSVC)
   message(FATAL_ERROR "Build CpuOverlay with MSVC on Windows.")

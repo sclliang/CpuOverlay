@@ -12,7 +12,7 @@ std::wstring Value(const std::optional<double>& value, int decimals, const wchar
     swprintf_s(buffer, L"%.*f%s", decimals, *value, unit);
     return buffer;
 }
-std::vector<std::wstring> Metrics(const CpuSample& sample) {
+std::vector<std::wstring> Metrics(const CpuSample& sample, DWORD visibleMetrics) {
     auto battery = [](const BatterySample& s) {
         auto text = Value(s.percent, 0, L"%");
         if (s.state == BatteryState::Disconnected) text += L"(断开)";
@@ -20,22 +20,35 @@ std::vector<std::wstring> Metrics(const CpuSample& sample) {
         else if (s.state == BatteryState::Fresh && s.charging) text += L"(充电)";
         return text;
     };
-    return {L"处理器:" + Value(sample.usagePercent, 1, L"%"), L"频率:" + Value(sample.frequencyGhz, 2, L"GHz"),
+    const std::vector<std::wstring> all{L"处理器:" + Value(sample.usagePercent, 1, L"%"), L"频率:" + Value(sample.frequencyGhz, 2, L"GHz"),
         L"温度:" + Value(sample.hardware.temperatureC, 0, L"℃"), L"功耗:" + Value(sample.hardware.packageWatts, 1, L"W"),
         L"内存:" + Value(sample.memoryPercent, 1, L"%"), L"显卡:" + Value(sample.gpuPercent, 1, L"%"),
         L"键盘:" + battery(sample.peripherals.keyboard), L"鼠标:" + battery(sample.peripherals.mouse)};
+    std::vector<std::wstring> selected;
+    for (unsigned i = 0; i < OverlayMetric::Count; ++i) if (visibleMetrics & (1u << i)) selected.push_back(all[i]);
+    return selected;
 }
 }
 
-std::wstring FormatOverlayText(const CpuSample& sample) {
+std::wstring FormatOverlayText(const CpuSample& sample, const OverlaySettings& settings) {
     std::wstring text;
-    for (const auto& item : Metrics(sample)) { if (!text.empty()) text += L" | "; text += item; }
+    for (const auto& item : Metrics(sample, settings.visibleMetrics)) { if (!text.empty()) text += L" | "; text += item; }
     return text;
 }
 
 std::unique_ptr<Gdiplus::Bitmap> RenderOverlay(const CpuSample& sample, float scale, int maxWidth, int maxHeight,
     const OverlaySettings& settings, bool positioning) {
     if (!std::isfinite(scale) || scale <= 0) return nullptr;
+    auto metrics = Metrics(sample, settings.visibleMetrics);
+    if (metrics.empty()) {
+        if (positioning) metrics.push_back(L"未选择显示项（拖动定位）");
+        else {
+            auto empty = std::make_unique<Gdiplus::Bitmap>(1, 1, PixelFormat32bppPARGB);
+            if (empty->GetLastStatus() != Gdiplus::Ok) return nullptr;
+            Gdiplus::Graphics clear(empty.get()); clear.Clear(Gdiplus::Color(0, 0, 0, 0));
+            return empty;
+        }
+    }
     Gdiplus::FontFamily family(settings.font.c_str());
     Gdiplus::FontFamily fallback(L"Microsoft YaHei");
     const auto* chosen = family.IsAvailable() ? &family : (fallback.IsAvailable() ? &fallback : Gdiplus::FontFamily::GenericSansSerif());
@@ -46,7 +59,6 @@ std::unique_ptr<Gdiplus::Bitmap> RenderOverlay(const CpuSample& sample, float sc
     Gdiplus::GraphicsPath path;
     Gdiplus::StringFormat format(Gdiplus::StringFormat::GenericTypographic());
     float x = 0, y = 0;
-    const auto metrics = Metrics(sample);
     for (size_t i = 0; i < metrics.size(); ++i) {
         Gdiplus::GraphicsPath item;
         if (item.AddString(metrics[i].c_str(), -1, chosen, style, em, Gdiplus::PointF(x, y), &format) != Gdiplus::Ok) return nullptr;

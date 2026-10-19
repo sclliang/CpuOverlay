@@ -149,7 +149,7 @@ int WriteDiagnostics(const wchar_t* path) {
     if (!file) return 2;
     CpuSampler sampler;
     sampler.Prime();
-    file << "{\n  \"version\": \"1.6.0.0\",\n  \"elevated\": " << (IsElevated() ? "true" : "false")
+    file << "{\n  \"version\": \"1.7.0.0\",\n  \"elevated\": " << (IsElevated() ? "true" : "false")
          << ",\n  \"sample_interval_ms\": 1000,\n  \"samples\": [\n";
     bool valid = true;
     for (int i = 0; i < 4; ++i) {
@@ -311,7 +311,7 @@ private:
         // Non-visible controller title exposes read-only integration diagnostics.
         const auto status = pump_.Snapshot();
         std::wostringstream text;
-        text << L"CpuOverlay 1.6.0.0 | overlay=" << (visible_ ? L"visible" : L"hidden")
+        text << L"CpuOverlay 1.7.0.0 | overlay=" << (visible_ ? L"visible" : L"hidden")
              << L" | pump=" << (!status.active ? L"paused" : status.connected ? L"connected" : L"disconnected")
              << L" | sent=" << status.sent << L" | temperature=";
         if (status.temperatureC) text << *status.temperatureC; else text << L"--";
@@ -363,8 +363,9 @@ private:
         const int margin = settings.position == 5 ? 0 : MulDiv(settings.margin, static_cast<int>(dpiX), 96);
         const auto sample = Latest();
         // Expose the same readings to accessibility and desktop integration checks.
-        std::wstring title = L"CpuOverlay — " + FormatOverlayText(sample);
-        if (!sample.hardware.temperatureC || !sample.hardware.packageWatts) {
+        std::wstring title = L"CpuOverlay — " + FormatOverlayText(sample, settings);
+        if (((settings.visibleMetrics & OverlayMetric::Temperature) && !sample.hardware.temperatureC) ||
+            ((settings.visibleMetrics & OverlayMetric::Power) && !sample.hardware.packageWatts)) {
             const std::string status(sample.hardware.status);
             title += L" — PawnIO: " + std::wstring(status.begin(), status.end()) +
                 L" (" + std::to_wstring(static_cast<DWORD>(sample.hardware.error)) + L")";
@@ -404,7 +405,7 @@ private:
         data.hWnd = controller_; data.uID = kTrayId; data.uFlags = NIF_TIP;
         const auto sample = Latest();
         if (visible_ && sample.usagePercent && sample.frequencyGhz)
-            wcsncpy_s(data.szTip, (FormatOverlayText(sample) + L"\n" + ShortcutText(settings_) + L" 显示 / 隐藏").c_str(), _TRUNCATE);
+            wcsncpy_s(data.szTip, (FormatOverlayText(sample, preview_ ? *preview_ : settings_) + L"\n" + ShortcutText(settings_) + L" 显示 / 隐藏").c_str(), _TRUNCATE);
         else wcsncpy_s(data.szTip, (std::wstring(visible_ ? L"CpuOverlay — 正在采样 | " : L"CpuOverlay — 已隐藏 | ") + ShortcutText(settings_) + L" 显示 / 隐藏").c_str(), _TRUNCATE);
         Shell_NotifyIconW(NIM_MODIFY, &data);
     }
@@ -526,7 +527,7 @@ private:
             if (status != ERROR_SUCCESS) ShowError(L"无法修改开机自启设置。", status);
         } else if (selected == RetryHotkey) RegisterShortcut();
         else if (selected == About) {
-            const std::wstring help = L"CpuOverlay 1.6.0.0\n\n" + ShortcutText(settings_) +
+            const std::wstring help = L"CpuOverlay 1.7.0.0\n\n" + ShortcutText(settings_) +
                 L"：显示 / 隐藏；单击托盘图标也可切换。\n"
                 L"右键托盘 → 设置：快捷键、横/纵排列、自定义坐标及拖动定位。\n"
                 L"可调整字体、字号、粗细、颜色、不透明度、间距和描边。\n"

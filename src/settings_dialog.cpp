@@ -85,6 +85,8 @@ void Fill(HWND window, Dialog& d) {
     if ((s.hotkeyKey >= VK_PRIOR && s.hotkeyKey <= VK_DOWN) || s.hotkeyKey == VK_INSERT || s.hotkeyKey == VK_DELETE) modifiers |= HOTKEYF_EXT;
     SendDlgItemMessageW(window, IDC_HOTKEY, HKM_SETHOTKEY, MAKEWORD(s.hotkeyKey, modifiers), 0);
     CheckDlgButton(window, IDC_WINKEY, s.hotkeyModifiers & MOD_WIN ? BST_CHECKED : BST_UNCHECKED);
+    for (unsigned i = 0; i < OverlayMetric::Count; ++i)
+        CheckDlgButton(window, IDC_METRIC_CPU + i, s.visibleMetrics & (1u << i) ? BST_CHECKED : BST_UNCHECKED);
     SendDlgItemMessageW(window, IDC_LAYOUT, CB_SETCURSEL, s.vertical, 0);
     SendDlgItemMessageW(window, IDC_POSITION, CB_SETCURSEL, s.position, 0);
     int display = 0;
@@ -130,6 +132,9 @@ bool Read(HWND window, Dialog& d, OverlaySettings& s, bool report) {
     s.font = Text(window, IDC_FONT);
     s.bold = IsDlgButtonChecked(window, IDC_BOLD) == BST_CHECKED;
     s.italic = IsDlgButtonChecked(window, IDC_ITALIC) == BST_CHECKED;
+    s.visibleMetrics = 0;
+    for (unsigned i = 0; i < OverlayMetric::Count; ++i)
+        if (IsDlgButtonChecked(window, IDC_METRIC_CPU + i) == BST_CHECKED) s.visibleMetrics |= 1u << i;
     std::wstring error;
     if (!ValidateOverlaySettings(s, error)) return fail(error);
     Gdiplus::FontFamily font(s.font.c_str());

@@ -172,7 +172,7 @@ void Report(const Options& options, const Outcome& outcome) {
     if (options.uninstall && options.report.empty()) return;
     std::error_code error; fs::create_directories(path.parent_path(), error);
     std::ofstream file(path);
-    file << "{\n  \"version\": \"1.6.0.0\",\n  \"success\": " << (outcome.success ? "true" : "false")
+    file << "{\n  \"version\": \"1.7.0.0\",\n  \"success\": " << (outcome.success ? "true" : "false")
         << ",\n  \"target\": \"" << Json(options.target.wstring()) << "\",\n  \"pawnio_was_present\": " << (outcome.pawnPresent ? "true" : "false")
         << ",\n  \"pawnio_installed_now\": " << (outcome.pawnInstalled ? "true" : "false")
         << ",\n  \"error\": \"" << Json(outcome.error) << "\"\n}\n";
@@ -256,7 +256,7 @@ Outcome Perform(const Options& options, HWND progress) {
         stage(75, L"正在配置快捷方式和登录自启…");
         Require(Run(main, options.startup ? L"--enable-startup" : L"--disable-startup") == 0, L"登录自启配置失败。");
         WriteRegistry(kUninstallKey, L"DisplayName", L"CpuOverlay");
-        WriteRegistry(kUninstallKey, L"DisplayVersion", L"1.6.0.0");
+        WriteRegistry(kUninstallKey, L"DisplayVersion", L"1.7.0.0");
         WriteRegistry(kUninstallKey, L"Publisher", L"sixunited");
         WriteRegistry(kUninstallKey, L"InstallLocation", options.target.wstring());
         WriteRegistry(kUninstallKey, L"DisplayIcon", main.wstring());
@@ -295,7 +295,7 @@ bool Confirm(Options& options) {
         TASKDIALOGCONFIG dialog{sizeof(dialog)};
         dialog.dwFlags = TDF_SIZE_TO_CONTENT | (options.startup ? TDF_VERIFICATION_FLAG_CHECKED : 0);
         dialog.pszWindowTitle = L"CpuOverlay 安装";
-        dialog.pszMainInstruction = L"安装 CpuOverlay 1.6.0.0";
+        dialog.pszMainInstruction = L"安装 CpuOverlay 1.7.0.0";
         dialog.pszContent = content.c_str(); dialog.pszVerificationText = L"登录 Windows 后自动运行";
         dialog.pButtons = buttons; dialog.cButtons = ARRAYSIZE(buttons); dialog.nDefaultButton = 100;
         int selected = 0; BOOL checked = FALSE;

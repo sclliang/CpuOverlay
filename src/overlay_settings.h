@@ -3,6 +3,13 @@
 #include <string>
 #include <vector>
 
+namespace OverlayMetric {
+constexpr DWORD CpuUsage = 1u << 0, Frequency = 1u << 1, Temperature = 1u << 2, Power = 1u << 3;
+constexpr DWORD Memory = 1u << 4, Gpu = 1u << 5, Keyboard = 1u << 6, Mouse = 1u << 7;
+constexpr DWORD All = 0xff;
+constexpr unsigned Count = 8;
+}
+
 struct OverlaySettings {
     DWORD position = 4; // Existing corner IDs: TR, TL, BR, BL, top center; 5 = custom.
     DWORD vertical = 0;
@@ -12,6 +19,7 @@ struct OverlaySettings {
     COLORREF color = RGB(255, 255, 0), outlineColor = RGB(15, 23, 35);
     int outlineWidth = 2, opacity = 100, gap = 8;
     UINT hotkeyModifiers = MOD_ALT, hotkeyKey = VK_F1;
+    DWORD visibleMetrics = OverlayMetric::All;
     std::wstring font = L"Microsoft YaHei UI", monitor;
 };
 

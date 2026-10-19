@@ -3,7 +3,7 @@
 #include <iterator>
 
 namespace {
-constexpr wchar_t kValue[] = L"DisplaySettingsV1";
+constexpr wchar_t kValue[] = L"DisplaySettingsV2";
 struct SavedSettings {
     DWORD version = 1, bytes = sizeof(SavedSettings);
     DWORD position, vertical;
@@ -13,6 +13,7 @@ struct SavedSettings {
     UINT modifiers, key;
     wchar_t font[LF_FACESIZE], monitor[CCHDEVICENAME];
 };
+struct SavedSettingsV2 { SavedSettings base; DWORD visibleMetrics = OverlayMetric::All; };
 DWORD Dword(const wchar_t* key, const wchar_t* name, DWORD fallback) {
     DWORD value = 0, bytes = sizeof(value);
     return RegGetValueW(HKEY_CURRENT_USER, key, name, RRF_RT_REG_DWORD, nullptr, &value, &bytes) == ERROR_SUCCESS ? value : fallback;
@@ -37,6 +38,8 @@ bool ValidateOverlaySettings(const OverlaySettings& s, std::wstring& error) {
     else if ((s.bold != 0 && s.bold != 1) || (s.italic != 0 && s.italic != 1) || s.outlineWidth < 0 || s.outlineWidth > 6 ||
         s.opacity < 10 || s.opacity > 100 || s.gap < 0 || s.gap > 40 || s.color > 0xffffff || s.outlineColor > 0xffffff)
         error = L"不透明度需在 10–100% 之间，间距需在 0–40 之间，描边宽度需在 0–6 之间。";
+    else if (s.visibleMetrics & ~OverlayMetric::All)
+        error = L"显示内容包含无效选项。";
     else if ((s.hotkeyModifiers & ~(MOD_ALT | MOD_CONTROL | MOD_SHIFT | MOD_WIN)) || !s.hotkeyKey || s.hotkeyKey > 254 ||
         s.hotkeyKey == VK_F12 || s.hotkeyKey == VK_SHIFT || s.hotkeyKey == VK_CONTROL || s.hotkeyKey == VK_MENU ||
         s.hotkeyKey == VK_LWIN || s.hotkeyKey == VK_RWIN || s.hotkeyKey == VK_ESCAPE || s.hotkeyKey == VK_TAB ||
@@ -48,12 +51,17 @@ bool ValidateOverlaySettings(const OverlaySettings& s, std::wstring& error) {
 }
 
 OverlaySettings LoadOverlaySettings(const wchar_t* key) {
-    SavedSettings saved{};
-    DWORD bytes = sizeof(saved);
-    if (RegGetValueW(HKEY_CURRENT_USER, key, kValue, RRF_RT_REG_BINARY, nullptr, &saved, &bytes) == ERROR_SUCCESS &&
-        bytes == sizeof(saved) && saved.version == 1 && saved.bytes == sizeof(saved) &&
-        std::find(std::begin(saved.font), std::end(saved.font), L'\0') != std::end(saved.font) &&
-        std::find(std::begin(saved.monitor), std::end(saved.monitor), L'\0') != std::end(saved.monitor)) {
+    // Read the current atomic profile first, then the unmodified V1 profile.
+    // Upgrades keep existing appearance/shortcut settings and show all metrics.
+    for (DWORD version : {2u, 1u}) {
+        SavedSettingsV2 stored{};
+        auto& saved = stored.base;
+        const DWORD expected = version == 2 ? sizeof(stored) : sizeof(saved);
+        DWORD bytes = expected;
+        if (RegGetValueW(HKEY_CURRENT_USER, key, version == 2 ? kValue : L"DisplaySettingsV1", RRF_RT_REG_BINARY,
+            nullptr, &stored, &bytes) != ERROR_SUCCESS || bytes != expected || saved.version != version || saved.bytes != expected) continue;
+        if (std::find(std::begin(saved.font), std::end(saved.font), L'\0') == std::end(saved.font) ||
+            std::find(std::begin(saved.monitor), std::end(saved.monitor), L'\0') == std::end(saved.monitor)) continue;
         OverlaySettings s;
         s.position = saved.position; s.vertical = saved.vertical;
         s.x = saved.x; s.y = saved.y; s.margin = saved.margin;
@@ -61,6 +69,7 @@ OverlaySettings LoadOverlaySettings(const wchar_t* key) {
         s.color = saved.color; s.outlineColor = saved.outlineColor;
         s.outlineWidth = saved.outlineWidth; s.opacity = saved.opacity; s.gap = saved.gap;
         s.hotkeyModifiers = saved.modifiers; s.hotkeyKey = saved.key;
+        s.visibleMetrics = version == 2 ? stored.visibleMetrics : OverlayMetric::All;
         s.font = saved.font; s.monitor = saved.monitor;
         std::wstring error;
         if (ValidateOverlaySettings(s, error)) return s;
@@ -70,7 +79,7 @@ OverlaySettings LoadOverlaySettings(const wchar_t* key) {
     if (Dword(key, L"PositionVersion", 0) >= 2) s.position = std::min<DWORD>(Dword(key, L"Corner", 4), 4);
     const int points[]{14, 18, 23};
     s.fontPoints = points[std::min<DWORD>(Dword(key, L"Size", 1), 2)];
-    wchar_t monitor[CCHDEVICENAME]{}; bytes = sizeof(monitor);
+    wchar_t monitor[CCHDEVICENAME]{}; DWORD bytes = sizeof(monitor);
     if (RegGetValueW(HKEY_CURRENT_USER, key, L"Monitor", RRF_RT_REG_SZ, nullptr, monitor, &bytes) == ERROR_SUCCESS) s.monitor = monitor;
     return s;
 }
@@ -78,7 +87,10 @@ OverlaySettings LoadOverlaySettings(const wchar_t* key) {
 LSTATUS SaveOverlaySettings(const OverlaySettings& s, const wchar_t* key) {
     std::wstring error;
     if (!ValidateOverlaySettings(s, error)) return ERROR_INVALID_DATA;
-    SavedSettings saved{};
+    SavedSettingsV2 stored{};
+    auto& saved = stored.base;
+    saved.version = 2; saved.bytes = sizeof(stored);
+    stored.visibleMetrics = s.visibleMetrics;
     saved.position = s.position; saved.vertical = s.vertical;
     saved.x = s.x; saved.y = s.y; saved.margin = s.margin;
     saved.fontPoints = s.fontPoints; saved.bold = s.bold; saved.italic = s.italic;
@@ -90,7 +102,7 @@ LSTATUS SaveOverlaySettings(const OverlaySettings& s, const wchar_t* key) {
     LSTATUS result = RegCreateKeyExW(HKEY_CURRENT_USER, key, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &opened, nullptr);
     if (result != ERROR_SUCCESS) return result;
     // One value prevents an interrupted save from leaving a partially applied profile.
-    result = RegSetValueExW(opened, kValue, 0, REG_BINARY, reinterpret_cast<const BYTE*>(&saved), sizeof(saved));
+    result = RegSetValueExW(opened, kValue, 0, REG_BINARY, reinterpret_cast<const BYTE*>(&stored), sizeof(stored));
     RegCloseKey(opened);
     return result;
 }

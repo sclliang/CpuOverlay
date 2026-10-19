@@ -2,6 +2,7 @@
 #include "overlay_renderer.h"
 #include <iostream>
 #include <algorithm>
+#include <cstring>
 
 namespace {
 unsigned checks = 0, failures = 0;
@@ -19,6 +20,12 @@ int main() {
         OverlaySettings s;
         std::wstring error;
         Check(ValidateOverlaySettings(s, error), "defaults valid");
+        Check(s.visibleMetrics == OverlayMetric::All, "all eight metrics visible by default");
+        s.visibleMetrics = 0;
+        Check(ValidateOverlaySettings(s, error), "all unchecked is a supported transparent overlay");
+        s.visibleMetrics = 0x100;
+        Check(!ValidateOverlaySettings(s, error), "undefined display bits rejected");
+        s = {};
         Check(ShortcutText(s) == L"Alt+F1", "default shortcut label");
         s.hotkeyKey = 'A'; s.hotkeyModifiers = 0;
         Check(!ValidateOverlaySettings(s, error), "bare letters cannot steal normal typing");
@@ -53,8 +60,10 @@ int main() {
         s.color = RGB(25, 130, 220); s.outlineColor = RGB(233, 244, 255); s.outlineWidth = 4;
         s.gap = 12; s.opacity = 70; s.margin = 22;
         s.hotkeyModifiers = MOD_CONTROL | MOD_SHIFT; s.hotkeyKey = VK_F9; s.monitor = L"\\\\.\\DISPLAY2";
+        s.visibleMetrics = OverlayMetric::Temperature | OverlayMetric::Keyboard | OverlayMetric::Mouse;
         Check(SaveOverlaySettings(s, key.c_str()) == ERROR_SUCCESS, "atomic settings save");
         const auto loaded = LoadOverlaySettings(key.c_str());
+        Check(loaded.visibleMetrics == s.visibleMetrics, "selected metrics survive reload");
         Check(loaded.font == s.font && loaded.fontPoints == 33 && !loaded.bold && loaded.italic && loaded.color == s.color &&
             loaded.outlineColor == s.outlineColor && loaded.outlineWidth == 4 && loaded.opacity == 70 && loaded.gap == 12, "appearance survives reload");
         Check(loaded.position == 5 && loaded.vertical && loaded.x == 234 && loaded.y == 567 && loaded.monitor == s.monitor &&
@@ -62,9 +71,27 @@ int main() {
         s.fontPoints = 1000;
         Check(SaveOverlaySettings(s, key.c_str()) == ERROR_INVALID_DATA && LoadOverlaySettings(key.c_str()).fontPoints == 33, "invalid save preserves previous configuration");
         HKEY testKey = nullptr;
-        RegOpenKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, KEY_SET_VALUE, &testKey);
+        RegOpenKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, KEY_SET_VALUE | KEY_QUERY_VALUE, &testKey);
+        DWORD size = 0;
+        RegQueryValueExW(testKey, L"DisplaySettingsV2", nullptr, nullptr, nullptr, &size);
+        std::vector<BYTE> oldProfile(size);
+        RegQueryValueExW(testKey, L"DisplaySettingsV2", nullptr, nullptr, oldProfile.data(), &size);
+        oldProfile.resize(size - sizeof(DWORD));
+        const DWORD v1Header[] = {1, static_cast<DWORD>(oldProfile.size())};
+        std::memcpy(oldProfile.data(), v1Header, sizeof(v1Header));
+        RegSetValueExW(testKey, L"DisplaySettingsV1", 0, REG_BINARY, oldProfile.data(), static_cast<DWORD>(oldProfile.size()));
+        RegDeleteValueW(testKey, L"DisplaySettingsV2");
+        const auto migrated = LoadOverlaySettings(key.c_str());
+        Check(migrated.fontPoints == 33 && migrated.hotkeyKey == VK_F9 && migrated.x == 234 && migrated.color == s.color &&
+            migrated.visibleMetrics == OverlayMetric::All, "V1 migration preserves appearance/shortcut and defaults all metrics on");
+        s = migrated; s.visibleMetrics = OverlayMetric::Mouse;
+        Check(SaveOverlaySettings(s, key.c_str()) == ERROR_SUCCESS && LoadOverlaySettings(key.c_str()).visibleMetrics == OverlayMetric::Mouse,
+            "new selections override the retained legacy profile");
         const DWORD junk = 0xffffffff;
-        RegSetValueExW(testKey, L"DisplaySettingsV1", 0, REG_BINARY, reinterpret_cast<const BYTE*>(&junk), sizeof(junk));
+        RegSetValueExW(testKey, L"DisplaySettingsV2", 0, REG_BINARY, reinterpret_cast<const BYTE*>(&junk), sizeof(junk));
+        Check(LoadOverlaySettings(key.c_str()).fontPoints == 33 && LoadOverlaySettings(key.c_str()).visibleMetrics == OverlayMetric::All,
+            "damaged V2 profile falls back to intact legacy settings");
+        RegDeleteValueW(testKey, L"DisplaySettingsV1");
         RegCloseKey(testKey);
         Check(LoadOverlaySettings(key.c_str()).fontPoints == 18, "corrupt settings safely fall back");
         RegDeleteTreeW(HKEY_CURRENT_USER, key.c_str());
@@ -78,6 +105,22 @@ int main() {
         text = FormatOverlayText(batteryPreview);
         Check(text.find(L"键盘:14%(未更新)") != std::wstring::npos && text.find(L"鼠标:49%(断开)") != std::wstring::npos, "stale/disconnected readings visibly distinguished from live values");
         Check(FormatOverlayText(CpuSample{}).find(L"键盘:--% | 鼠标:--%") != std::wstring::npos, "unknown batteries are never shown as zero");
+        s.visibleMetrics = OverlayMetric::Temperature | OverlayMetric::Mouse;
+        Check(FormatOverlayText(PreviewSample(), s) == L"温度:55℃ | 鼠标:49%", "selection removes excluded values and extra separators");
+        const wchar_t* names[] = {L"处理器:", L"频率:", L"温度:", L"功耗:", L"内存:", L"显卡:", L"键盘:", L"鼠标:"};
+        for (unsigned i = 0; i < OverlayMetric::Count; ++i) {
+            s.visibleMetrics = 1u << i;
+            const auto single = FormatOverlayText(PreviewSample(), s);
+            Check(single.find(names[i]) == 0 && single.find(L'|') == std::wstring::npos, "each checkbox maps to its own metric without separators");
+        }
+        s.visibleMetrics = 0;
+        auto empty = RenderOverlay(PreviewSample(), 1, 1920, 1040, s);
+        Gdiplus::Color emptyPixel; if (empty) empty->GetPixel(0, 0, &emptyPixel);
+        Check(FormatOverlayText(PreviewSample(), s).empty() && empty && empty->GetWidth() == 1 && empty->GetHeight() == 1 && !emptyPixel.GetA(),
+            "all unchecked renders a truly transparent pixel instead of failing");
+        const auto positioning = RenderOverlay(PreviewSample(), 1, 1920, 1040, s, true);
+        Check(positioning && positioning->GetWidth() > 100, "all unchecked still supports explicit drag positioning");
+        s = {};
         auto horizontal = RenderOverlay(PreviewSample(), 1, 1920, 1040, s);
         s.vertical = 1;
         auto vertical = RenderOverlay(PreviewSample(), 1, 1920, 1040, s);

@@ -6,7 +6,7 @@
 #include <memory>
 #include <string>
 
-std::wstring FormatOverlayText(const CpuSample& sample);
+std::wstring FormatOverlayText(const CpuSample& sample, const OverlaySettings& settings = {});
 std::unique_ptr<Gdiplus::Bitmap> RenderOverlay(const CpuSample& sample, float scale, int maxWidth = 0,
     int maxHeight = 0, const OverlaySettings& settings = {}, bool positioning = false);
 bool PresentOverlay(HWND window, Gdiplus::Bitmap& bitmap, POINT position);
