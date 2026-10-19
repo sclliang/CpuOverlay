@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(CpuOverlay VERSION 1.4.0.0 LANGUAGES CXX RC)
+project(CpuOverlay VERSION 1.6.0.0 LANGUAGES CXX RC)
 
 if(NOT WIN32 OR NOT MSVC)
   message(FATAL_ERROR "Build CpuOverlay with MSVC on Windows.")
@@ -7,14 +7,14 @@ endif()
 
 add_executable(CpuOverlay WIN32
   src/main.cpp src/cpu_sampler.cpp src/overlay_renderer.cpp src/pawn_sensors.cpp src/startup.cpp
-  src/overlay_settings.cpp src/settings_dialog.cpp
+  src/overlay_settings.cpp src/settings_dialog.cpp src/peripheral_battery.cpp src/pump_display.cpp
   resources/CpuOverlay.rc)
 target_compile_features(CpuOverlay PRIVATE cxx_std_17)
 target_include_directories(CpuOverlay PRIVATE "${CMAKE_SOURCE_DIR}/third_party/pawnio")
 target_compile_definitions(CpuOverlay PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
 target_compile_options(CpuOverlay PRIVATE /W4 /permissive- /utf-8 /EHsc)
 set_property(TARGET CpuOverlay PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-target_link_libraries(CpuOverlay PRIVATE user32 gdi32 gdiplus shell32 advapi32 pdh powrprof shcore ole32 oleaut32 taskschd uuid comctl32 comdlg32)
+target_link_libraries(CpuOverlay PRIVATE user32 gdi32 gdiplus shell32 advapi32 pdh powrprof shcore ole32 oleaut32 taskschd uuid comctl32 comdlg32 hid setupapi)
 target_link_options(CpuOverlay PRIVATE /MANIFEST:NO)
 set_target_properties(CpuOverlay PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_SOURCE_DIR}/package"
@@ -61,6 +61,20 @@ target_compile_options(CpuOverlaySettingsTests PRIVATE /W4 /permissive- /utf-8 /
 set_property(TARGET CpuOverlaySettingsTests PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 target_link_libraries(CpuOverlaySettingsTests PRIVATE user32 gdi32 gdiplus advapi32)
 add_test(NAME CpuOverlaySettingsTests COMMAND CpuOverlaySettingsTests)
+
+add_executable(CpuOverlayBatteryTests EXCLUDE_FROM_ALL tests/battery_tests.cpp)
+target_include_directories(CpuOverlayBatteryTests PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_compile_features(CpuOverlayBatteryTests PRIVATE cxx_std_17)
+target_compile_options(CpuOverlayBatteryTests PRIVATE /W4 /permissive- /utf-8 /EHsc)
+set_property(TARGET CpuOverlayBatteryTests PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+add_test(NAME CpuOverlayBatteryTests COMMAND CpuOverlayBatteryTests)
+
+add_executable(CpuOverlayPumpTests EXCLUDE_FROM_ALL tests/pump_tests.cpp)
+target_include_directories(CpuOverlayPumpTests PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_compile_features(CpuOverlayPumpTests PRIVATE cxx_std_17)
+target_compile_options(CpuOverlayPumpTests PRIVATE /W4 /permissive- /utf-8 /EHsc)
+set_property(TARGET CpuOverlayPumpTests PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+add_test(NAME CpuOverlayPumpTests COMMAND CpuOverlayPumpTests)
 
 configure_file(installer/payload.rc.in "${CMAKE_BINARY_DIR}/payload.rc.in" @ONLY)
 file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/payload-$<CONFIG>.rc" INPUT "${CMAKE_BINARY_DIR}/payload.rc.in")

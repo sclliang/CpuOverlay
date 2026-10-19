@@ -1,9 +1,9 @@
 # CpuOverlay
 
-Windows 10 / 11 x64 桌面性能监控，C++ / Win32 原生实现。版本 **1.4.0.0**。
+Windows 10 / 11 x64 桌面性能监控，C++ / Win32 原生实现。版本 **1.6.0.0**。
 
 ```text
-处理器:12.3% | 频率:4.25GHz | 温度:55℃ | 功耗:42.1W | 内存:37.5% | 显卡:18.0%
+处理器:12.3% | 频率:4.25GHz | 温度:55℃ | 功耗:42.1W | 内存:37.5% | 显卡:18.0% | 键盘:14% | 鼠标:49%
 ```
 
 默认使用黄色粗体文字、横向排列，以 `|` 分隔。背景透明、鼠标穿透、置顶，不抢键盘焦点。初始位置为所选显示器工作区**顶部居中**，距顶部 16 个逻辑像素。可在设置中更改快捷键、排列、位置及文字外观；超过屏幕宽度或高度时等比缩小，保持内容可见。
@@ -18,7 +18,7 @@ Windows 10 / 11 x64 桌面性能监控，C++ / Win32 原生实现。版本 **1.4
 - **单击托盘图标**：显示 / 隐藏。
 - **右键托盘图标 → 设置**：快捷键、横向 / 纵向排列、自定义坐标、拖动定位和字体外观。菜单也保留常用位置、字号、显示器及排列方向的快捷选项。
 - 安装完成立即显示；以后登录启动时隐藏驻留，按已配置的快捷键显示。
-- 每秒采样；隐藏后暂停，重新显示约一秒后出现读数。
+- 系统指标每秒采样；键鼠电量独立线程每 30 秒查询，读取失败时每 5 秒再查询。隐藏后暂停这些显示项的完整采样，但已连接的乔思伯数显屏继续获取 CPU 温度。
 - 再次启动只显示已有实例；热键被其他软件占用时有明确提示，可通过托盘操作。
 
 托盘图标可能位于右下角 `^` 中。平时悬浮窗保持鼠标穿透；需要移动时，在设置中点击“拖动定位”，拖动桌面上的浅色监控条，松开鼠标后会把位置填回设置窗口，并恢复鼠标穿透。点击“应用”或“确定”保存；“取消”撤销尚未应用的修改。
@@ -42,6 +42,18 @@ Windows 10 / 11 x64 桌面性能监控，C++ / Win32 原生实现。版本 **1.4
 
 升级时沿用旧版的位置、显示器和三档字号偏好；新配置作为单个版本化注册表值保存，避免部分写入。显示设置不会修改登录自启偏好。
 
+## 乔思伯水冷数显屏
+
+从 1.6.0.0 起，CpuOverlay 运行后自动连接本机的乔思伯数显屏（USB `5131:2007`，HID UsagePage `FF00` / Usage `01`），直接发送与悬浮窗相同来源的 CPU 温度，单位固定为摄氏度。无需启动或安装 JONSBO PC Monitor，不需要额外运行库。原乔思伯软件和它的启动项由用户自行卸载，本程序不修改它们。
+
+- 登录后隐藏驻留时仍发送；Alt+F1 只切换悬浮窗，不停止数显屏更新。
+- 温度每秒采样，显示报文每 200 毫秒发送；隐藏时只保留硬件传感器采样，不刷新 GPU / 内存计数器和键鼠电量。
+- 只支持已核对的上述设备和温度显示协议；不控制水泵转速、风扇、灯光或固件。
+- 设备未连接时静默等待，每 5 秒重连；其他程序占用写入接口时也等待，不终止对方进程。
+- 无有效温度或样本超过 3 秒时停止发送，不用 0℃ 代替故障。屏幕可能保留最后一个数字，其清屏行为由固件决定。程序退出后停止更新；系统休眠时释放接口，恢复后重连并读取新温度。
+
+协议核对、状态及测试说明见 [docs/PUMP_DISPLAY.md](docs/PUMP_DISPLAY.md)。
+
 ## 自动启动与权限
 
 PawnIO 硬件访问需要管理员权限。手动启动主程序时会请求提权；安装器创建当前用户的最高权限计划任务，用户登录桌面后自动运行，无需每次登录点击 UAC。
@@ -60,6 +72,12 @@ PawnIO 硬件访问需要管理员权限。手动启动主程序时会请求提�
 | 功耗 | Intel RAPL / AMD Zen Package Energy 能量增量除以实际采样时间，处理硬件单位与 32 位回绕。失败时尝试 Windows `Energy Meter(rapl_package0_pkg)\Power`，将毫瓦转换为 W。两条路径均只取首个 CPU 封装，不汇总其他插槽、GPU、DRAM 或整机功耗。 |
 | 内存 | `GlobalMemoryStatusEx` 的已用物理内存 / 总物理内存。 |
 | 显卡 | Windows GPU Engine 计数器；先汇总同一物理引擎的各进程负载，再取所有显卡中最繁忙的引擎，范围 0–100%。 |
+| 键盘 | VGN V98Pro V4 1K 的 2.4G 接收器（391D:2A04），官方 V HUB 的 HID 电量查询报文，返回百分比及充电状态。 |
+| 鼠标 | Razer Viper V3 HyperSpeed 的原厂 2.4G 接收器（1532:00B8），HID Feature 电量查询，原始 0–255 换算成百分比。 |
+
+键鼠监控目前仅适配以上两个接收器，不把其他 VGN/雷蛇型号或蓝牙接口视为兼容。首次未读到电量显示 `--%`；设备未响应时保留本次运行中最近一次成功读数并标记 `(未更新)`，接收器拔出标记 `(断开)`。有线下不支持的接口不会猜测电量。键盘睡眠可能不响应，按键唤醒后下次查询会更新；`未更新` 也可能是通信错误，不能据此断定正在休眠。有效的键盘充电状态显示 `(充电)`，失去响应后不会保留旧充电标记。读数是设备估计值，鼠标显示取整。
+
+HID 查询与系统采样分线程，使用可取消、带超时的 I/O，不阻塞界面和 CPU 刷新。正常每 30 秒更新，超过 35 秒未有新值视为过期；隐藏时暂停查询，恢复显示后重新查询。无需安装 Python、HIDAPI DLL、V HUB 或 Synapse；只使用 Windows 自带 HID / SetupAPI。实现仅发送已验证的电量读取请求，不修改灯光、按键、DPI、配对或固件。协议来源与边界见 [docs/PERIPHERAL_BATTERY.md](docs/PERIPHERAL_BATTERY.md)。
 
 程序通过 CPUID 自动选择官方签名的 PawnIO 模块；支持范围按硬件家族划分，不依赖营销名称匹配：
 
@@ -110,7 +128,7 @@ package/
 cd D:\Code\CpuOverlay
 .\build.ps1
 # 无需管理员权限或 PawnIO 的算法测试：
-cmake --build build --config Release --target CpuOverlaySensorTests CpuOverlaySettingsTests
+cmake --build build --config Release --target CpuOverlaySensorTests CpuOverlaySettingsTests CpuOverlayBatteryTests CpuOverlayPumpTests
 ctest --test-dir build -C Release --output-on-failure
 # 无驱动环境下验证发布文件、依赖、绘图和操作系统指标：
 .\scripts\verify-release.ps1 -SkipHardware
@@ -136,18 +154,20 @@ ctest --test-dir build -C Release --output-on-failure
 | `--enable-startup` / `--disable-startup` | 配置当前用户计划任务后退出，需管理员权限 |
 | `--no-autostart` | 本次启动不自动更新自启配置 |
 | `--diagnostics <JSON绝对路径>` | 采集四个真实样本、CPU 厂商 / Family / Model、读取来源、原始 MSR / SMN / PCI 温度、能量单位、温度偏移与系统计量毫瓦值；需从管理员进程启动才能读 PawnIO；不改自启 |
+| `--battery-diagnostics <JSON绝对路径>` | 只查询两个接收器的电量，输出电量、状态、最近成功读数的时间间隔及 Win32 错误码；无需管理员权限，不改自启或现有实例 |
+| `--pump-diagnostics <JSON绝对路径>` | 无窗口向数显屏发送真实 CPU 温度约 5 秒，并检查暂停/恢复；从管理员终端运行才能读 PawnIO，不能与正在占用数显屏的实例同时测试。返回 0=发送及暂停恢复成功，3=温度/连接/写入不可用，2=文件错误 |
 | `--settings` | 打开设置窗口；已有实例时将设置请求发送给该实例 |
 | `--preview <PNG绝对路径>` | 输出同一绘图路径生成的透明示例图；不改自启 |
 
-诊断退出码：0=六项数据正常，2=文件/参数错误，3=至少一项不可用。预览数字是示例数据。
+普通诊断退出码：0=六项系统数据正常，2=文件/参数错误，3=至少一项系统数据不可用。附带的电量不影响普通诊断退出码，以免未连接指定外设时误判系统采样失败。单独电量诊断返回 0 表示两个电量均成功读取，3 表示至少一个未读到；同样以 2 表示文件/参数错误。预览数字是示例数据。
 
 安装器可使用 `--silent --target "绝对目录"`；可选 `--no-launch`、`--no-startup`、`--report "JSON绝对路径"`。`--uninstall --target "登记的安装目录"` 卸载。静默模式仍需管理员权限，返回 0 成功、1 失败、1223 取消；不会绕过 UAC。已经安装的 PawnIO 不会被重复安装或降级。
 
 ## 程序属性
 
-产品 CpuOverlay，版本 1.4.0.0，CompanyName `sixunited`，Author `sclliang`。作者及版权仅保存在文件元数据，不在程序界面显示。
+产品 CpuOverlay，版本 1.6.0.0，CompanyName `sixunited`，Author `sclliang`。作者及版权仅保存在文件元数据，不在程序界面显示。
 
-- 主程序 FileDescription：`CPU, Memory and GPU Performance Desktop Overlay`
+- 主程序 FileDescription：`System Performance, Battery and Cooling Display Monitor`
 - 安装器 FileDescription：`CpuOverlay Installer with PawnIO Driver Setup`
 - OriginalFilename 分别为 `CpuOverlay.exe`、`CpuOverlay-Setup.exe`。
 - `Copyright (c) 2026 sixunited. Author: sclliang`

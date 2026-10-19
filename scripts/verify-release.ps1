@@ -1,4 +1,4 @@
-﻿param([string]$ExecutablePath, [string]$ArtifactDirectory, [switch]$SkipHardware)
+param([string]$ExecutablePath, [string]$ArtifactDirectory, [switch]$SkipHardware)
 $ErrorActionPreference = 'Stop'
 $projectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $exePath = if ($ExecutablePath) { $ExecutablePath } else { Join-Path $projectRoot 'package\CpuOverlay.exe' }
@@ -15,9 +15,9 @@ $version = (Get-Item -LiteralPath $exePath).VersionInfo
 $fields = @{
     CompanyName = 'sixunited'
     ProductName = 'CpuOverlay'
-    FileDescription = 'CPU, Memory and GPU Performance Desktop Overlay'
-    FileVersion = '1.4.0.0'
-    ProductVersion = '1.4.0.0'
+    FileDescription = 'System Performance, Battery and Cooling Display Monitor'
+    FileVersion = '1.6.0.0'
+    ProductVersion = '1.6.0.0'
     OriginalFilename = 'CpuOverlay.exe'
     InternalName = 'CpuOverlay'
     LegalCopyright = 'Copyright (c) 2026 sixunited. Author: sclliang'
@@ -27,8 +27,7 @@ $numericFileVersion = "$($version.FileMajorPart).$($version.FileMinorPart).$($ve
 $numericProductVersion = "$($version.ProductMajorPart).$($version.ProductMinorPart).$($version.ProductBuildPart).$($version.ProductPrivatePart)"
 Assert-Condition ($numericFileVersion -eq $fields.FileVersion) 'Numeric file version mismatch.'
 Assert-Condition ($numericProductVersion -eq $fields.ProductVersion) 'Numeric product version mismatch.'
-# FileVersionInfo translates the language name using the OS display language.
-Assert-Condition ($version.Language -in @('English (United States)', '英语(美国)', '英语（美国）')) "Unexpected resource language: $($version.Language)"
+# Verify numeric translation IDs below; Language is localized by the host OS.
 $setupPath = Join-Path $projectRoot 'package\CpuOverlay-Setup.exe'
 $setupVersion = (Get-Item -LiteralPath $setupPath).VersionInfo
 $setupFields = $fields.Clone()
@@ -60,6 +59,20 @@ public static class InstallerPayload {
     [DllImport("kernel32")] static extern IntPtr LoadResource(IntPtr module, IntPtr resource);
     [DllImport("kernel32")] static extern IntPtr LockResource(IntPtr resource);
     [DllImport("kernel32")] static extern bool FreeLibrary(IntPtr module);
+    public static int LanguageId(string path) {
+        uint unused;
+        uint size = GetFileVersionInfoSize(path, out unused);
+        if (size == 0) throw new Win32Exception();
+        var data = new byte[size];
+        if (!GetFileVersionInfo(path, 0, size, data)) throw new Win32Exception();
+        var pinned = GCHandle.Alloc(data, GCHandleType.Pinned);
+        try {
+            IntPtr value;
+            uint length;
+            if (!VerQueryValue(pinned.AddrOfPinnedObject(), @"\VarFileInfo\Translation", out value, out length) || length < 4) return -1;
+            return (ushort)Marshal.ReadInt16(value);
+        } finally { pinned.Free(); }
+    }
     public static string Author(string path) {
         uint unused;
         uint size = GetFileVersionInfoSize(path, out unused);
@@ -87,6 +100,8 @@ public static class InstallerPayload {
     }
 }
 '@
+Assert-Condition ([InstallerPayload]::LanguageId($exePath) -eq 0x0409) 'Main executable language must be English (United States).'
+Assert-Condition ([InstallerPayload]::LanguageId($setupPath) -eq 0x0409) 'Installer language must be English (United States).'
 Assert-Condition ([InstallerPayload]::Author($exePath) -eq 'sclliang') 'Main executable author metadata mismatch.'
 Assert-Condition ([InstallerPayload]::Author($setupPath) -eq 'sclliang') 'Installer author metadata mismatch.'
 Assert-Condition ([InstallerPayload]::Hash($setupPath, 101) -eq (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash) 'Installer contains a stale main executable.'
@@ -208,7 +223,7 @@ $dependencies = & $dumpbin /dependents $exePath
 Assert-Condition ($LASTEXITCODE -eq 0) 'dumpbin failed.'
 $dlls = @($dependencies | ForEach-Object { if ($_ -match '^\s+([A-Za-z0-9_.-]+\.dll)\s*$') { $Matches[1] } })
 Assert-Condition ($dlls.Count -gt 0) 'No import dependencies found.'
-$systemDlls = @('USER32.dll','GDI32.dll','gdiplus.dll','SHELL32.dll','ADVAPI32.dll','pdh.dll','POWRPROF.dll','api-ms-win-shcore-scaling-l1-1-1.dll','KERNEL32.dll','ole32.dll','OLEAUT32.dll','COMCTL32.dll','COMDLG32.dll','VERSION.dll')
+$systemDlls = @('USER32.dll','GDI32.dll','gdiplus.dll','SHELL32.dll','ADVAPI32.dll','pdh.dll','POWRPROF.dll','api-ms-win-shcore-scaling-l1-1-1.dll','KERNEL32.dll','ole32.dll','OLEAUT32.dll','COMCTL32.dll','COMDLG32.dll','VERSION.dll','HID.DLL','SETUPAPI.dll')
 foreach ($dll in $dlls) { Assert-Condition ($dll -in $systemDlls) "Unexpected runtime dependency: $dll" }
 $setupImports = & $dumpbin /dependents $setupPath
 Assert-Condition ($LASTEXITCODE -eq 0) 'Installer dumpbin failed.'

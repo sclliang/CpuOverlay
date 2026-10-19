@@ -13,9 +13,17 @@ std::wstring Value(const std::optional<double>& value, int decimals, const wchar
     return buffer;
 }
 std::vector<std::wstring> Metrics(const CpuSample& sample) {
+    auto battery = [](const BatterySample& s) {
+        auto text = Value(s.percent, 0, L"%");
+        if (s.state == BatteryState::Disconnected) text += L"(断开)";
+        else if (s.state == BatteryState::Stale) text += L"(未更新)";
+        else if (s.state == BatteryState::Fresh && s.charging) text += L"(充电)";
+        return text;
+    };
     return {L"处理器:" + Value(sample.usagePercent, 1, L"%"), L"频率:" + Value(sample.frequencyGhz, 2, L"GHz"),
         L"温度:" + Value(sample.hardware.temperatureC, 0, L"℃"), L"功耗:" + Value(sample.hardware.packageWatts, 1, L"W"),
-        L"内存:" + Value(sample.memoryPercent, 1, L"%"), L"显卡:" + Value(sample.gpuPercent, 1, L"%")};
+        L"内存:" + Value(sample.memoryPercent, 1, L"%"), L"显卡:" + Value(sample.gpuPercent, 1, L"%"),
+        L"键盘:" + battery(sample.peripherals.keyboard), L"鼠标:" + battery(sample.peripherals.mouse)};
 }
 }
 
@@ -144,6 +152,8 @@ CpuSample PreviewSample() {
     sample.hardware.packageWatts = 42.1;
     sample.memoryPercent = 37.5;
     sample.gpuPercent = 18.0;
+    UpdateBattery(sample.peripherals.keyboard, BatteryProtocol::Reading{14, false}, true, GetTickCount64(), 0);
+    UpdateBattery(sample.peripherals.mouse, BatteryProtocol::Reading{48.6, false}, true, GetTickCount64(), 0);
     return sample;
 }
 

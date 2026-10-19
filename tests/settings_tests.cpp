@@ -70,6 +70,14 @@ int main() {
         RegDeleteTreeW(HKEY_CURRENT_USER, key.c_str());
 
         s = {};
+        auto batteryPreview = PreviewSample();
+        auto text = FormatOverlayText(batteryPreview);
+        Check(text.find(L"键盘:14% | 鼠标:49%") != std::wstring::npos, "battery metrics share the horizontal separator layout");
+        UpdateBattery(batteryPreview.peripherals.keyboard, {}, true, 0, 1460);
+        UpdateBattery(batteryPreview.peripherals.mouse, {}, false, 0, 1167);
+        text = FormatOverlayText(batteryPreview);
+        Check(text.find(L"键盘:14%(未更新)") != std::wstring::npos && text.find(L"鼠标:49%(断开)") != std::wstring::npos, "stale/disconnected readings visibly distinguished from live values");
+        Check(FormatOverlayText(CpuSample{}).find(L"键盘:--% | 鼠标:--%") != std::wstring::npos, "unknown batteries are never shown as zero");
         auto horizontal = RenderOverlay(PreviewSample(), 1, 1920, 1040, s);
         s.vertical = 1;
         auto vertical = RenderOverlay(PreviewSample(), 1, 1920, 1040, s);

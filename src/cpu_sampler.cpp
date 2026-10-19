@@ -114,6 +114,7 @@ std::optional<double> CpuSampler::ReadSystemUsage() {
 }
 
 void CpuSampler::Prime() {
+    batteries_.SetActive(true);
     if (!query_) OpenCounters();
     if (query_) PdhCollectQueryData(query_);
     haveTimes_ = false;
@@ -121,8 +122,11 @@ void CpuSampler::Prime() {
     pawn_.Prime();
 }
 
+void CpuSampler::Pause() { batteries_.SetActive(false); }
+
 CpuSample CpuSampler::Collect() {
     CpuSample sample;
+    sample.peripherals = batteries_.Snapshot();
     sample.hardware = pawn_.Collect();
     MEMORYSTATUSEX memory{sizeof(memory)};
     if (GlobalMemoryStatusEx(&memory) && memory.ullTotalPhys && memory.ullAvailPhys <= memory.ullTotalPhys) {

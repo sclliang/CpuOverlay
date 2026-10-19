@@ -3,6 +3,7 @@
 #include <pdh.h>
 #include <optional>
 #include "pawn_sensors.h"
+#include "peripheral_battery.h"
 
 struct CpuSample {
     std::optional<double> usagePercent;
@@ -12,6 +13,7 @@ struct CpuSample {
     uint64_t memoryUsedBytes = 0, memoryTotalBytes = 0;
     unsigned gpuEngineCount = 0;
     PawnSample hardware;
+    PeripheralSample peripherals;
     const char* frequencySource = "unavailable";
     const char* usageSource = "unavailable";
     std::optional<double> energyMeterMilliwatts;
@@ -24,7 +26,10 @@ public:
     CpuSampler(const CpuSampler&) = delete;
     CpuSampler& operator=(const CpuSampler&) = delete;
     void Prime();
+    void Pause();
     CpuSample Collect();
+    void PrimeHardware() { pawn_.Prime(); }
+    PawnSample CollectHardware() { return pawn_.Collect(); }
 private:
     void OpenCounters();
     std::optional<double> Read(PDH_HCOUNTER counter) const;
@@ -37,6 +42,7 @@ private:
     PDH_HCOUNTER gpu_ = nullptr;
     PDH_HCOUNTER packagePower_ = nullptr;
     PawnSensors pawn_;
+    PeripheralBatteryMonitor batteries_;
     ULONGLONG idle_ = 0, total_ = 0;
     bool haveTimes_ = false;
     unsigned failures_ = 0;
