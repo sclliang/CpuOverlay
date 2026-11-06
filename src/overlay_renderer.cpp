@@ -12,7 +12,11 @@ std::wstring Value(const std::optional<double>& value, int decimals, const wchar
     swprintf_s(buffer, L"%.*f%s", decimals, *value, unit);
     return buffer;
 }
-std::vector<std::wstring> Metrics(const CpuSample& sample, const OverlaySettings& settings) {
+struct MetricText {
+    std::wstring label, value;
+    std::wstring Text() const { return label.empty() ? value : label + L":" + value; }
+};
+std::vector<MetricText> Metrics(const CpuSample& sample, const OverlaySettings& settings) {
     auto battery = [](const BatterySample& s) {
         auto text = Value(s.percent, 0, L"%");
         if (s.state == BatteryState::Disconnected) text += L"(断开)";
@@ -20,27 +24,25 @@ std::vector<std::wstring> Metrics(const CpuSample& sample, const OverlaySettings
         else if (s.state == BatteryState::Fresh && s.charging) text += L"(充电)";
         return text;
     };
-    const std::vector<std::wstring> all{L"处理器:" + Value(sample.usagePercent, 1, L"%"), L"频率:" + Value(sample.frequencyGhz, 2, L"GHz"),
-        L"温度:" + Value(sample.hardware.temperatureC, 0, L"℃"), L"功耗:" + Value(sample.hardware.packageWatts, 1, L"W"),
-        L"内存:" + Value(sample.memoryPercent, 1, L"%"), L"显卡:" + Value(sample.gpuPercent, 1, L"%"),
-        L"键盘:" + battery(sample.peripherals.keyboard), L"鼠标:" + battery(sample.peripherals.mouse),
-        L"型号:" + (sample.gpu.name.empty() ? std::wstring(L"--") : sample.gpu.name),
-        L"显卡温度:" + Value(sample.gpu.temperatureC, 0, L"℃"), L"显卡频率:" + Value(sample.gpu.clockMhz, 0, L"MHz"),
-        L"显卡功耗:" + Value(sample.gpu.powerWatts, 1, L"W"),
-        L"显存:" + Value(sample.gpu.memoryUsedBytes ? std::optional<double>(*sample.gpu.memoryUsedBytes / 1073741824.0) : std::nullopt, 1, L"GB"),
-        L"帧率:" + Value(sample.frameRate.fps, 0, L"FPS"), L"1% Low:" + Value(sample.frameRate.onePercentLow, 0, L"FPS"),
-        CodexQuotaLabel(sample.codex.primary, false) + L":" + CodexQuotaValue(sample.codex.primary, sample.codex.state),
-        CodexQuotaLabel(sample.codex.secondary, true) + L":" + CodexQuotaValue(sample.codex.secondary, sample.codex.state)};
-    std::vector<std::wstring> selected;
+    const std::vector<std::wstring> all{Value(sample.usagePercent, 1, L"%"), Value(sample.frequencyGhz, 2, L"GHz"),
+        Value(sample.hardware.temperatureC, 0, L"℃"), Value(sample.hardware.packageWatts, 1, L"W"),
+        Value(sample.memoryPercent, 1, L"%"), Value(sample.gpuPercent, 1, L"%"),
+        battery(sample.peripherals.keyboard), battery(sample.peripherals.mouse),
+        sample.gpu.name.empty() ? std::wstring(L"--") : sample.gpu.name,
+        Value(sample.gpu.temperatureC, 0, L"℃"), Value(sample.gpu.clockMhz, 0, L"MHz"),
+        Value(sample.gpu.powerWatts, 1, L"W"),
+        Value(sample.gpu.memoryUsedBytes ? std::optional<double>(*sample.gpu.memoryUsedBytes / 1073741824.0) : std::nullopt, 1, L"GB"),
+        Value(sample.frameRate.fps, 0, L"FPS"), Value(sample.frameRate.onePercentLow, 0, L"FPS")};
+    std::vector<MetricText> selected;
     for (const auto i : settings.metricOrder)
-        if (i < all.size() && (settings.visibleMetrics & (1u << i))) selected.push_back(all[i]);
+        if (i < all.size() && (settings.visibleMetrics & (1u << i))) selected.push_back({settings.metricLabels[i], all[i]});
     return selected;
 }
 }
 
 std::wstring FormatOverlayText(const CpuSample& sample, const OverlaySettings& settings) {
     std::wstring text;
-    for (const auto& item : Metrics(sample, settings)) { if (!text.empty()) text += L" | "; text += item; }
+    for (const auto& item : Metrics(sample, settings)) { if (!text.empty()) text += L" | "; text += item.Text(); }
     return text;
 }
 
@@ -49,7 +51,7 @@ std::unique_ptr<Gdiplus::Bitmap> RenderOverlay(const CpuSample& sample, float sc
     if (!std::isfinite(scale) || scale <= 0) return nullptr;
     auto metrics = Metrics(sample, settings);
     if (metrics.empty()) {
-        if (positioning) metrics.push_back(L"未选择显示项（拖动定位）");
+        if (positioning) metrics.push_back({{}, L"未选择显示项（拖动定位）"});
         else {
             auto empty = std::make_unique<Gdiplus::Bitmap>(1, 1, PixelFormat32bppPARGB);
             if (empty->GetLastStatus() != Gdiplus::Ok) return nullptr;
@@ -73,10 +75,10 @@ std::unique_ptr<Gdiplus::Bitmap> RenderOverlay(const CpuSample& sample, float sc
     float labelColumnWidth = 0;
     if (settings.vertical || settings.valueGap > 0) {
         for (size_t i = 0; i < metrics.size(); ++i) {
-            const auto colon = metrics[i].find(L':');
-            if (colon == std::wstring::npos) continue;
+            if (metrics[i].label.empty()) continue;
+            const auto label = metrics[i].label + L":";
             Gdiplus::RectF labelBounds;
-            if (measurement.MeasureString(metrics[i].c_str(), static_cast<INT>(colon + 1), &measurementFont,
+            if (measurement.MeasureString(label.c_str(), static_cast<INT>(label.size()), &measurementFont,
                 Gdiplus::PointF(0, 0), &format, &labelBounds) != Gdiplus::Ok) return nullptr;
             labelWidths[i] = labelBounds.Width;
             labelColumnWidth = std::max(labelColumnWidth, labelWidths[i]);
@@ -85,17 +87,16 @@ std::unique_ptr<Gdiplus::Bitmap> RenderOverlay(const CpuSample& sample, float sc
     float x = 0, y = 0;
     for (size_t i = 0; i < metrics.size(); ++i) {
         Gdiplus::GraphicsPath item;
-        const auto colon = metrics[i].find(L':');
-        if ((settings.vertical || settings.valueGap > 0) && colon != std::wstring::npos) {
-            const auto label = metrics[i].substr(0, colon + 1);
-            const auto value = metrics[i].substr(colon + 1);
+        if ((settings.vertical || settings.valueGap > 0) && !metrics[i].label.empty()) {
+            const auto label = metrics[i].label + L":";
+            const auto& value = metrics[i].value;
             // Every visible row shares one value column, including a zero gap.
             // Hidden labels do not reserve space; reordering keeps the column stable.
             const float labelWidth = settings.vertical ? labelColumnWidth : labelWidths[i];
             if (item.AddString(label.c_str(), -1, chosen, style, em, Gdiplus::PointF(x, y), &format) != Gdiplus::Ok ||
                 item.AddString(value.c_str(), -1, chosen, style, em,
                     Gdiplus::PointF(x + labelWidth + static_cast<float>(settings.valueGap), y), &format) != Gdiplus::Ok) return nullptr;
-        } else if (item.AddString(metrics[i].c_str(), -1, chosen, style, em, Gdiplus::PointF(x, y), &format) != Gdiplus::Ok) return nullptr;
+        } else if (item.AddString(metrics[i].Text().c_str(), -1, chosen, style, em, Gdiplus::PointF(x, y), &format) != Gdiplus::Ok) return nullptr;
         Gdiplus::RectF itemBounds; item.GetBounds(&itemBounds); path.AddPath(&item, FALSE);
         if (settings.vertical) y += lineHeight + static_cast<float>(settings.gap);
         else if (i + 1 < metrics.size()) {
@@ -207,9 +208,6 @@ CpuSample PreviewSample() {
     sample.gpu.memoryUsedBytes = 6ULL * 1024 * 1024 * 1024; sample.gpu.memoryTotalBytes = 16ULL * 1024 * 1024 * 1024;
     sample.frameRate.fps = 144;
     sample.frameRate.onePercentLow = 110;
-    sample.codex.primary = {82.0, 300, CodexUnixNow() + 7200};
-    sample.codex.secondary = {64.0, 10080, CodexUnixNow() + 259200};
-    sample.codex.state = CodexQuotaState::Ready;
     UpdateBattery(sample.peripherals.keyboard, BatteryProtocol::Reading{14, false}, true, GetTickCount64(), 0);
     UpdateBattery(sample.peripherals.mouse, BatteryProtocol::Reading{48.6, false}, true, GetTickCount64(), 0);
     return sample;

@@ -39,7 +39,6 @@ Set-Location .\CpuOverlay
 cmake --build build --config Release --target CpuOverlaySensorTests CpuOverlaySettingsTests CpuOverlayBatteryTests CpuOverlayPumpTests
 cmake --build build --config Release --target CpuOverlayGpuTests CpuOverlayFrameRateTests
 cmake --build build --config Release --target CpuOverlayVendorBatteryTests
-cmake --build build --config Release --target CpuOverlayCodexTests
 ctest --test-dir build -C Release --output-on-failure
 # 无驱动环境下验证发布文件、依赖、绘图和操作系统指标：
 .\scripts\verify-release.ps1 -SkipHardware
@@ -57,11 +56,11 @@ Voltide 协议改写为原生 C++，其 MIT 许可证及固定来源说明随 `b
 
 验证脚本检查两个发布 EXE 的版本资源、英文语言、静态运行库依赖、Intel / AMD 外置模块和内嵌模块的哈希、安装器载荷、真实六项采样与原始 MSR / SMN 计算、透明黄色横排绘图，并用仅包含系统目录的 PATH、异于 EXE 的工作目录运行发布程序。`-SkipHardware` 会明确将温度 / 功耗实测标记为跳过，不代表硬件读取验证通过。
 
-自动测试覆盖传感器换算、配置读写与异常数据、DPI 和屏幕边界、横纵绘制、颜色 / 透明度，以及真实 Windows 热键注册中的冲突、取消和切换。Codex 测试覆盖额度格式、真实零值、单周期、过期、分片管道、登录失败、超时、取消和子进程清理。桌面集成测试可构建 `CpuOverlayProbe` 目标，在默认顶部居中布局下使用已配置快捷键检查焦点和穿透点击。测试工具不发布。
+自动测试覆盖传感器换算、配置读写与异常数据、DPI 和屏幕边界、横纵绘制、颜色 / 透明度，以及真实 Windows 热键注册中的冲突、取消和切换。设置测试还覆盖 15 项名称独立保存、V1–V6 配置迁移、中文 / 英文 / 标点名称、长名称与数值列对齐，并通过实际对话框验证改名、取消、恢复默认、预览和应用。桌面集成测试可构建 `CpuOverlayProbe` 目标，在默认顶部居中布局下使用已配置快捷键检查焦点和穿透点击。测试工具不发布。
 
 ## 程序属性
 
-产品 CpuOverlay，版本 1.10.0.0，CompanyName `sixunited`，Author `sclliang`。作者及版权仅保存在文件元数据，不在程序界面显示。
+产品 CpuOverlay，版本 1.11.0.0，CompanyName `sixunited`，Author `sclliang`。作者及版权仅保存在文件元数据，不在程序界面显示。
 
 - 主程序 FileDescription：`System Performance, Battery and Cooling Display Monitor`
 - 安装器 FileDescription：`CpuOverlay Installer with PawnIO Driver Setup`

@@ -1,5 +1,7 @@
 #include "overlay_settings.h"
 #include "overlay_renderer.h"
+#include "settings_dialog.h"
+#include "../resources/settings_ids.h"
 #include <iostream>
 #include <algorithm>
 #include <cstring>
@@ -46,9 +48,98 @@ bool SaveBitmap(Gdiplus::Bitmap& bitmap, const std::filesystem::path& path) {
         if (wcscmp(encoders[i].MimeType, L"image/png") == 0) return bitmap.Save(path.c_str(), &encoders[i].Clsid, nullptr) == Gdiplus::Ok;
     return false;
 }
+
+// Drive only the dialogs created by this test process. The production callbacks
+// and registry transaction are exercised without touching the user's profile.
+struct NamesUiTest {
+    HWND owner = nullptr;
+    int action = 0, stage = 0, ticks = 0, applied = 0;
+    bool cancelMain = false, complete = false, editorLimits = true, previewed = false;
+    OverlaySettings original, saved, preview;
+    std::filesystem::path capture;
+    std::wstring key;
+};
+HWND NamesEditor() {
+    HWND result = nullptr;
+    EnumThreadWindows(GetCurrentThreadId(), [](HWND window, LPARAM data) -> BOOL {
+        if (!GetDlgItem(window, IDC_LABEL_CPU)) return TRUE;
+        *reinterpret_cast<HWND*>(data) = window; return FALSE;
+    }, reinterpret_cast<LPARAM>(&result));
+    return result;
+}
+void CaptureTestWindow(HWND window, const std::filesystem::path& path) {
+    if (path.empty()) return;
+    RECT rect{}; GetWindowRect(window, &rect);
+    HDC screen = GetWindowDC(window), memory = CreateCompatibleDC(screen);
+    HBITMAP bitmap = CreateCompatibleBitmap(screen, rect.right - rect.left, rect.bottom - rect.top);
+    const auto old = SelectObject(memory, bitmap);
+    if (PrintWindow(window, memory, 2)) {
+        Gdiplus::Bitmap picture(bitmap, nullptr);
+        Check(SaveBitmap(picture, path), "export the actual light name-editor dialog");
+    }
+    SelectObject(memory, old); DeleteObject(bitmap); DeleteDC(memory); ReleaseDC(window, screen);
+}
+void CALLBACK NamesUiTimer(HWND window, UINT, UINT_PTR timer, DWORD) {
+    auto& test = *reinterpret_cast<NamesUiTest*>(GetPropW(window, L"CpuOverlay.NamesTest"));
+    if (++test.ticks > 200) {
+        if (const auto editor = NamesEditor()) PostMessageW(editor, WM_CLOSE, 0, 0);
+        KillTimer(window, timer); PostMessageW(window, WM_CLOSE, 0, 0); return;
+    }
+    if (!test.stage) {
+        const auto editor = NamesEditor();
+        if (!editor) return;
+        for (unsigned i = 0; i < OverlayMetric::Count; ++i) {
+            const auto input = GetDlgItem(editor, IDC_LABEL_CPU + i);
+            test.editorLimits = test.editorLimits && input && SendMessageW(input, EM_GETLIMITTEXT, 0, 0) == 32;
+            SetDlgItemTextW(editor, IDC_LABEL_CPU + i, (L"传感器 " + std::to_wstring(i)).c_str());
+        }
+        if (test.action == 2) SendMessageW(editor, WM_COMMAND, IDC_NAMES_RESET, 0);
+        RedrawWindow(editor, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+        CaptureTestWindow(editor, test.capture);
+        test.stage = 1;
+        SendMessageW(editor, WM_COMMAND, test.action == 1 ? IDCANCEL : IDOK, 0);
+        return;
+    }
+    SendMessageW(window, WM_COMMAND, IDC_DESKTOP_PREVIEW, 0);
+    if (!test.cancelMain) SendMessageW(window, WM_COMMAND, IDC_APPLY, 0);
+    test.complete = true;
+    KillTimer(window, timer); RemovePropW(window, L"CpuOverlay.NamesTest");
+    SendMessageW(window, WM_COMMAND, IDCANCEL, 0);
+}
+void TestNamesDialog(int action, bool cancelMain, const std::filesystem::path& capture = {}) {
+    NamesUiTest test;
+    test.action = action; test.cancelMain = cancelMain; test.capture = capture;
+    test.original.metricLabels[0] = L"原始 CPU"; test.original.valueGap = 7; test.original.pumpEnabled = true;
+    test.key = L"Software\\sixunited\\CpuOverlay.NamesUiTests." + std::to_wstring(GetCurrentProcessId()) +
+        L"." + std::to_wstring(action) + (cancelMain ? L".cancel" : L".apply");
+    SaveOverlaySettings(test.original, test.key.c_str());
+    SettingsCallbacks callbacks;
+    callbacks.opened = [&test](HWND window) {
+        test.owner = window;
+        SetPropW(window, L"CpuOverlay.NamesTest", reinterpret_cast<HANDLE>(&test));
+        SetTimer(window, 42, 20, NamesUiTimer);
+        PostMessageW(window, WM_COMMAND, IDC_EDIT_NAMES, 0);
+    };
+    callbacks.preview = [&test](const OverlaySettings& value) { test.previewed = true; test.preview = value; };
+    callbacks.apply = [&test](const OverlaySettings& value, std::wstring&) {
+        ++test.applied; test.saved = value;
+        return SaveOverlaySettings(value, test.key.c_str()) == ERROR_SUCCESS;
+    };
+    ShowSettingsDialog(nullptr, GetModuleHandleW(nullptr), test.original, callbacks);
+    auto expected = action == 1 ? test.original.metricLabels : OverlayMetric::DefaultLabels();
+    if (!action) for (unsigned i = 0; i < OverlayMetric::Count; ++i) expected[i] = L"传感器 " + std::to_wstring(i);
+    Check(test.complete && test.editorLimits, "all fifteen name editors open with the intended input limit");
+    Check(test.previewed && test.preview.metricLabels == expected, "accept, cancel and reset flow into the desktop preview correctly");
+    const auto persisted = LoadOverlaySettings(test.key.c_str());
+    Check(test.applied == (cancelMain ? 0 : 1) && persisted.metricLabels == (cancelMain ? test.original.metricLabels : expected),
+        "only applying the main settings dialog persists changed names");
+    Check(persisted.valueGap == 7 && persisted.pumpEnabled, "renaming and resetting names preserve unrelated settings");
+    RegDeleteTreeW(HKEY_CURRENT_USER, test.key.c_str());
+}
 }
 
 int wmain(int argc, wchar_t** argv) {
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     ULONG_PTR token = 0;
     Gdiplus::GdiplusStartupInput startup;
     if (Gdiplus::GdiplusStartup(&token, &startup, nullptr) != Gdiplus::Ok) return 1;
@@ -75,7 +166,16 @@ int wmain(int argc, wchar_t** argv) {
         s = {}; s.metricOrder[0] = OverlayMetric::Count;
         Check(!ValidateOverlaySettings(s, error), "out-of-range metric order rejected");
         s = {};
-        Check(s.visibleMetrics == OverlayMetric::All, "all seventeen metrics visible by default");
+        Check(s.visibleMetrics == OverlayMetric::All, "all fifteen hardware metrics visible by default");
+        Check(s.metricLabels == OverlayMetric::DefaultLabels(), "default hardware keys preserve the existing display");
+        for (const auto& label : std::vector<std::wstring>{L"", L"   ", L"CPU\nTotal", L"CPU\t", std::wstring(33, L'A'),
+            std::wstring(L"CPU\0Total", 9), std::wstring(1, static_cast<wchar_t>(0xd800))}) {
+            auto invalid = s; invalid.metricLabels[0] = label;
+            Check(!ValidateOverlaySettings(invalid, error), "empty, overlong and malformed names are rejected");
+        }
+        s.metricLabels[0] = std::wstring(32, L'A'); s.metricLabels[2] = L"CPU:核心温度";
+        Check(ValidateOverlaySettings(s, error), "maximum-length keys and punctuation are supported");
+        s.metricLabels = OverlayMetric::DefaultLabels();
         s.visibleMetrics = 0;
         Check(ValidateOverlaySettings(s, error), "all unchecked is a supported transparent overlay");
         s.visibleMetrics = 1u << OverlayMetric::Count;
@@ -117,11 +217,13 @@ int wmain(int argc, wchar_t** argv) {
         s.valueGap = 17; s.pumpEnabled = true; s.refreshIntervalMs = 750;
         s.hotkeyModifiers = MOD_CONTROL | MOD_SHIFT; s.hotkeyKey = VK_F9; s.monitor = L"\\\\.\\DISPLAY2";
         s.visibleMetrics = OverlayMetric::Temperature | OverlayMetric::Keyboard | OverlayMetric::Mouse;
+        s.metricLabels[0] = std::wstring(32, L'C'); s.metricLabels[2] = L"核心温度"; s.metricLabels[7] = L"Mouse Battery";
         std::swap(s.metricOrder[0], s.metricOrder[13]);
         Check(SaveOverlaySettings(s, key.c_str()) == ERROR_SUCCESS, "atomic settings save");
         const auto loaded = LoadOverlaySettings(key.c_str());
         Check(loaded.visibleMetrics == s.visibleMetrics, "selected metrics survive reload");
         Check(loaded.metricOrder == s.metricOrder, "custom display order survives reload");
+        Check(loaded.metricLabels == s.metricLabels, "per-metric Chinese and English keys survive reload");
         Check(loaded.valueGap == 17 && loaded.pumpEnabled && loaded.refreshIntervalMs == 750,
             "label/value spacing, optional pump and refresh interval survive reload");
         Check(loaded.font == s.font && loaded.fontPoints == 33 && !loaded.bold && loaded.italic && loaded.color == s.color &&
@@ -133,96 +235,106 @@ int wmain(int argc, wchar_t** argv) {
         HKEY testKey = nullptr;
         RegOpenKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, KEY_SET_VALUE | KEY_QUERY_VALUE, &testKey);
         DWORD size = 0;
-        RegQueryValueExW(testKey, L"DisplaySettingsV6", nullptr, nullptr, nullptr, &size);
-        if (size <= sizeof(s.metricOrder) + 3 * sizeof(DWORD) + 15 * sizeof(DWORD)) {
-            std::cerr << "Cannot read test registry profile; run with current-user registry access.\n";
+        RegQueryValueExW(testKey, L"DisplaySettingsV7", nullptr, nullptr, nullptr, &size);
+        // Frozen fixture offsets describe the historical on-disk formats.
+        constexpr DWORD v1Bytes = 196, v5Bytes = 272, v6Bytes = 340, visibleOffset = 196, orderOffset = 200;
+        if (size <= v6Bytes) {
+            std::cerr << "Cannot read test registry profile.\n";
             if (testKey) RegCloseKey(testKey);
             return 1;
         }
-        std::vector<BYTE> oldProfile(size);
-        RegQueryValueExW(testKey, L"DisplaySettingsV6", nullptr, nullptr, oldProfile.data(), &size);
-        const auto savedProfileV6 = oldProfile;
-        // V6 appends the expanded order while keeping every historical layout frozen.
-        oldProfile.resize(size - sizeof(s.metricOrder));
-        size = static_cast<DWORD>(oldProfile.size());
-        const DWORD v5Header[] = {5, size};
-        std::memcpy(oldProfile.data(), v5Header, sizeof(v5Header));
-        RegSetValueExW(testKey, L"DisplaySettingsV5", 0, REG_BINARY, oldProfile.data(), size);
+        std::vector<BYTE> profile(size);
+        RegQueryValueExW(testKey, L"DisplaySettingsV7", nullptr, nullptr, profile.data(), &size);
+        const auto savedProfileV7 = profile;
+        auto write = [testKey](const wchar_t* name, const std::vector<BYTE>& bytes) {
+            return RegSetValueExW(testKey, name, 0, REG_BINARY, bytes.data(), static_cast<DWORD>(bytes.size()));
+        };
+        auto header = [](std::vector<BYTE>& bytes, DWORD version) {
+            const DWORD value[]{version, static_cast<DWORD>(bytes.size())};
+            std::memcpy(bytes.data(), value, sizeof(value));
+        };
+        auto visible = [](std::vector<BYTE>& bytes, DWORD value) {
+            std::memcpy(bytes.data() + visibleOffset, &value, sizeof(value));
+        };
+        const std::vector<BYTE> savedLegacyPrefix(profile.begin(), profile.begin() + v5Bytes);
+        auto oldProfile = savedLegacyPrefix;
+        oldProfile.resize(v6Bytes); header(oldProfile, 6);
+        std::vector<DWORD> expandedOrder{16};
+        expandedOrder.insert(expandedOrder.end(), loaded.metricOrder.begin(), loaded.metricOrder.end());
+        expandedOrder.insert(expandedOrder.begin() + 5, 15);
+        std::memcpy(oldProfile.data() + v5Bytes, expandedOrder.data(), 17 * sizeof(DWORD));
+        visible(oldProfile, loaded.visibleMetrics | (3u << 15));
+        write(L"DisplaySettingsV6", oldProfile); RegDeleteValueW(testKey, L"DisplaySettingsV7");
+        const auto migratedV6 = LoadOverlaySettings(key.c_str());
+        Check(migratedV6.metricOrder == loaded.metricOrder && migratedV6.visibleMetrics == loaded.visibleMetrics &&
+            migratedV6.metricLabels == OverlayMetric::DefaultLabels(), "V6 removes retired interleaved metrics and restores default hardware labels");
+        Check(migratedV6.valueGap == 17 && migratedV6.pumpEnabled && migratedV6.refreshIntervalMs == 750 &&
+            migratedV6.fontPoints == 33 && migratedV6.hotkeyKey == VK_F9, "V6 preserves hardware, appearance and shortcut preferences");
+        visible(oldProfile, 3u << 15); write(L"DisplaySettingsV6", oldProfile);
+        Check(LoadOverlaySettings(key.c_str()).visibleMetrics == 0, "a V6 profile with only removed metrics remains fully hidden");
+        visible(oldProfile, 0); write(L"DisplaySettingsV6", oldProfile);
+        Check(LoadOverlaySettings(key.c_str()).visibleMetrics == 0, "V6 all-hidden choice remains hidden");
+        std::memcpy(oldProfile.data() + v5Bytes + sizeof(DWORD), expandedOrder.data(), sizeof(DWORD));
+        write(L"DisplaySettingsV6", oldProfile);
+        Check(LoadOverlaySettings(key.c_str()).fontPoints == 18, "duplicate V6 entries safely reject corrupt migration");
         RegDeleteValueW(testKey, L"DisplaySettingsV6");
+
+        oldProfile = savedLegacyPrefix; header(oldProfile, 5); write(L"DisplaySettingsV5", oldProfile);
         const auto migratedV5 = LoadOverlaySettings(key.c_str());
-        Check(migratedV5.metricOrder == s.metricOrder && migratedV5.valueGap == 17 && migratedV5.pumpEnabled &&
-            migratedV5.refreshIntervalMs == 750 && migratedV5.visibleMetrics == (s.visibleMetrics | OverlayMetric::Codex),
-            "real fifteen-item V5 layout preserves settings and appends Codex metrics");
-        const auto savedProfileV5 = oldProfile;
-        constexpr size_t v5TailBytes = 3 * sizeof(DWORD);
-        constexpr size_t legacyOrderBytes = 15 * sizeof(DWORD);
-        const DWORD hidden = 0;
-        std::memcpy(oldProfile.data() + oldProfile.size() - v5TailBytes - legacyOrderBytes - sizeof(DWORD), &hidden, sizeof(hidden));
-        RegSetValueExW(testKey, L"DisplaySettingsV5", 0, REG_BINARY, oldProfile.data(), size);
-        Check(LoadOverlaySettings(key.c_str()).visibleMetrics == 0, "V5 all-hidden choice remains hidden after upgrade");
-        oldProfile = savedProfileV5;
-        oldProfile.resize(size - v5TailBytes);
-        size = static_cast<DWORD>(oldProfile.size());
-        const DWORD v4Header[] = {4, size};
-        std::memcpy(oldProfile.data(), v4Header, sizeof(v4Header));
-        RegSetValueExW(testKey, L"DisplaySettingsV4", 0, REG_BINARY, oldProfile.data(), size);
-        RegDeleteValueW(testKey, L"DisplaySettingsV5");
+        Check(migratedV5.metricOrder == loaded.metricOrder && migratedV5.valueGap == 17 && migratedV5.pumpEnabled &&
+            migratedV5.refreshIntervalMs == 750 && migratedV5.visibleMetrics == loaded.visibleMetrics &&
+            migratedV5.metricLabels == OverlayMetric::DefaultLabels(), "V5 preserves settings and supplies default label names");
+        visible(oldProfile, 0); write(L"DisplaySettingsV5", oldProfile);
+        Check(LoadOverlaySettings(key.c_str()).visibleMetrics == 0, "V5 all-hidden choice remains hidden");
+        oldProfile = savedLegacyPrefix; oldProfile.resize(260); header(oldProfile, 4);
+        write(L"DisplaySettingsV4", oldProfile); RegDeleteValueW(testKey, L"DisplaySettingsV5");
         const auto migratedV4 = LoadOverlaySettings(key.c_str());
-        Check(migratedV4.metricOrder == s.metricOrder && migratedV4.valueGap == 0 && !migratedV4.pumpEnabled &&
-            migratedV4.refreshIntervalMs == 1000 && migratedV4.visibleMetrics == (s.visibleMetrics | OverlayMetric::Codex),
-            "V4 migration preserves order and visibility, disables opt-in pump and keeps original spacing/refresh");
+        Check(migratedV4.metricOrder == loaded.metricOrder && migratedV4.valueGap == 0 && !migratedV4.pumpEnabled &&
+            migratedV4.refreshIntervalMs == 1000 && migratedV4.visibleMetrics == loaded.visibleMetrics, "V4 preserves order and visibility");
         RegDeleteValueW(testKey, L"DisplaySettingsV4");
-        oldProfile.resize(size - legacyOrderBytes);
-        size = static_cast<DWORD>(oldProfile.size());
-        const DWORD v3Header[] = {3, size};
-        std::memcpy(oldProfile.data(), v3Header, sizeof(v3Header));
-        RegSetValueExW(testKey, L"DisplaySettingsV3", 0, REG_BINARY, oldProfile.data(), size);
-        RegDeleteValueW(testKey, L"DisplaySettingsV5");
-        Check(LoadOverlaySettings(key.c_str()).visibleMetrics == (s.visibleMetrics | OverlayMetric::LowFps | OverlayMetric::Codex) &&
-            LoadOverlaySettings(key.c_str()).metricOrder == OverlayMetric::DefaultOrder(),
-            "V3 migration preserves visibility and supplies the original metric order");
+        oldProfile.resize(200); header(oldProfile, 3); write(L"DisplaySettingsV3", oldProfile);
+        Check(LoadOverlaySettings(key.c_str()).visibleMetrics == (loaded.visibleMetrics | OverlayMetric::LowFps) &&
+            LoadOverlaySettings(key.c_str()).metricOrder == OverlayMetric::DefaultOrder(), "V3 supplies original order and low-frame-rate metric");
         RegDeleteValueW(testKey, L"DisplaySettingsV3");
-        const DWORD v2Header[] = {2, size};
-        std::memcpy(oldProfile.data(), v2Header, sizeof(v2Header));
-        RegSetValueExW(testKey, L"DisplaySettingsV2", 0, REG_BINARY, oldProfile.data(), size);
-        RegDeleteValueW(testKey, L"DisplaySettingsV5");
-        Check(LoadOverlaySettings(key.c_str()).visibleMetrics == (s.visibleMetrics | OverlayMetric::AddedMetrics),
-            "V2 upgrade preserves old choices and enables new GPU/FPS metrics");
-        std::memcpy(oldProfile.data() + oldProfile.size() - sizeof(DWORD), &hidden, sizeof(hidden));
-        RegSetValueExW(testKey, L"DisplaySettingsV2", 0, REG_BINARY, oldProfile.data(), size);
-        Check(LoadOverlaySettings(key.c_str()).visibleMetrics == 0, "V2 all-hidden choice remains hidden after upgrade");
+        header(oldProfile, 2); write(L"DisplaySettingsV2", oldProfile);
+        Check(LoadOverlaySettings(key.c_str()).visibleMetrics == (loaded.visibleMetrics | OverlayMetric::AddedMetrics), "V2 enables added GPU and frame metrics");
+        visible(oldProfile, 0); write(L"DisplaySettingsV2", oldProfile);
+        Check(LoadOverlaySettings(key.c_str()).visibleMetrics == 0, "V2 all-hidden choice remains hidden");
         RegDeleteValueW(testKey, L"DisplaySettingsV2");
-        oldProfile.resize(size - sizeof(DWORD));
-        const DWORD v1Header[] = {1, static_cast<DWORD>(oldProfile.size())};
-        std::memcpy(oldProfile.data(), v1Header, sizeof(v1Header));
-        RegSetValueExW(testKey, L"DisplaySettingsV1", 0, REG_BINARY, oldProfile.data(), static_cast<DWORD>(oldProfile.size()));
-        RegDeleteValueW(testKey, L"DisplaySettingsV5");
+        oldProfile.resize(v1Bytes); header(oldProfile, 1); write(L"DisplaySettingsV1", oldProfile);
         const auto migrated = LoadOverlaySettings(key.c_str());
-        Check(migrated.fontPoints == 33 && migrated.hotkeyKey == VK_F9 && migrated.x == 234 && migrated.color == s.color &&
-            migrated.visibleMetrics == OverlayMetric::All, "V1 migration preserves appearance/shortcut and defaults all metrics on");
-        s = migrated; s.visibleMetrics = OverlayMetric::Mouse;
-        Check(SaveOverlaySettings(s, key.c_str()) == ERROR_SUCCESS && LoadOverlaySettings(key.c_str()).visibleMetrics == OverlayMetric::Mouse,
-            "new selections override the retained legacy profile");
-        s.visibleMetrics = OverlayMetric::CodexPrimary;
-        std::swap(s.metricOrder[0], s.metricOrder[16]);
-        Check(SaveOverlaySettings(s, key.c_str()) == ERROR_SUCCESS && LoadOverlaySettings(key.c_str()).visibleMetrics == OverlayMetric::CodexPrimary &&
-            LoadOverlaySettings(key.c_str()).metricOrder == s.metricOrder, "Codex switches and the expanded order survive V6 saves");
+        Check(migrated.fontPoints == 33 && migrated.hotkeyKey == VK_F9 && migrated.x == 234 && migrated.color == loaded.color &&
+            migrated.visibleMetrics == OverlayMetric::All, "V1 preserves appearance and defaults hardware metrics on");
+        s = migrated; s.visibleMetrics = OverlayMetric::Mouse; s.metricLabels[7] = L"鼠标电量";
+        Check(SaveOverlaySettings(s, key.c_str()) == ERROR_SUCCESS && LoadOverlaySettings(key.c_str()).visibleMetrics == OverlayMetric::Mouse &&
+            LoadOverlaySettings(key.c_str()).metricLabels == s.metricLabels, "V7 names and selections override retained legacy profiles");
+        s.metricLabels[7].clear();
+        Check(SaveOverlaySettings(s, key.c_str()) == ERROR_INVALID_DATA &&
+            LoadOverlaySettings(key.c_str()).metricLabels[7] == L"鼠标电量", "invalid label saves preserve the last valid configuration");
         const DWORD duplicate = 13;
-        auto corruptProfile = savedProfileV6;
-        std::memcpy(corruptProfile.data() + corruptProfile.size() - sizeof(s.metricOrder) + sizeof(DWORD), &duplicate, sizeof(duplicate));
-        RegSetValueExW(testKey, L"DisplaySettingsV6", 0, REG_BINARY, corruptProfile.data(), static_cast<DWORD>(corruptProfile.size()));
-        Check(LoadOverlaySettings(key.c_str()).metricOrder == OverlayMetric::DefaultOrder(), "corrupt saved order falls back safely");
-        corruptProfile = savedProfileV6;
+        auto corruptProfile = savedProfileV7;
+        std::memcpy(corruptProfile.data() + orderOffset + sizeof(DWORD), &duplicate, sizeof(duplicate));
+        write(L"DisplaySettingsV7", corruptProfile);
+        Check(LoadOverlaySettings(key.c_str()).metricOrder == OverlayMetric::DefaultOrder(), "corrupt V7 order falls back safely");
+        corruptProfile = savedProfileV7;
         const DWORD invalidPump = 2;
-        std::memcpy(corruptProfile.data() + corruptProfile.size() - sizeof(s.metricOrder) - 2 * sizeof(DWORD), &invalidPump, sizeof(invalidPump));
-        RegSetValueExW(testKey, L"DisplaySettingsV6", 0, REG_BINARY, corruptProfile.data(), static_cast<DWORD>(corruptProfile.size()));
-        Check(!LoadOverlaySettings(key.c_str()).pumpEnabled, "invalid persisted pump flag never enables hardware access");
+        std::memcpy(corruptProfile.data() + v5Bytes - 2 * sizeof(DWORD), &invalidPump, sizeof(invalidPump));
+        write(L"DisplaySettingsV7", corruptProfile);
+        Check(!LoadOverlaySettings(key.c_str()).pumpEnabled, "invalid pump flag never enables hardware access");
+        corruptProfile = savedProfileV7;
+        std::array<wchar_t, 33> unterminated; unterminated.fill(L'A');
+        std::memcpy(corruptProfile.data() + v5Bytes, unterminated.data(), sizeof(unterminated));
+        write(L"DisplaySettingsV7", corruptProfile);
+        Check(LoadOverlaySettings(key.c_str()).metricLabels == OverlayMetric::DefaultLabels(), "unterminated labels safely fall back");
+        corruptProfile = savedProfileV7;
+        const wchar_t newline = L'\n';
+        std::memcpy(corruptProfile.data() + v5Bytes, &newline, sizeof(newline));
+        write(L"DisplaySettingsV7", corruptProfile);
+        Check(LoadOverlaySettings(key.c_str()).metricLabels == OverlayMetric::DefaultLabels(), "persisted control characters are rejected");
         const DWORD junk = 0xffffffff;
-        RegSetValueExW(testKey, L"DisplaySettingsV6", 0, REG_BINARY, reinterpret_cast<const BYTE*>(&junk), sizeof(junk));
-        Check(LoadOverlaySettings(key.c_str()).fontPoints == 33 && LoadOverlaySettings(key.c_str()).visibleMetrics == OverlayMetric::All,
-            "damaged V6 profile falls back to intact legacy settings");
-        RegDeleteValueW(testKey, L"DisplaySettingsV1");
-        RegCloseKey(testKey);
+        RegSetValueExW(testKey, L"DisplaySettingsV7", 0, REG_BINARY, reinterpret_cast<const BYTE*>(&junk), sizeof(junk));
+        Check(LoadOverlaySettings(key.c_str()).fontPoints == 33 && LoadOverlaySettings(key.c_str()).visibleMetrics == OverlayMetric::All, "damaged V7 uses intact legacy profile");
+        RegDeleteValueW(testKey, L"DisplaySettingsV1"); RegCloseKey(testKey);
         Check(LoadOverlaySettings(key.c_str()).fontPoints == 18, "corrupt settings safely fall back");
         RegDeleteTreeW(HKEY_CURRENT_USER, key.c_str());
 
@@ -244,7 +356,7 @@ int wmain(int argc, wchar_t** argv) {
         Check(FormatOverlayText(PreviewSample(), s) == L"温度:55℃ | 鼠标:49%", "hidden reordered metrics leave no extra separators");
         s = {};
         const wchar_t* names[] = {L"处理器:", L"频率:", L"温度:", L"功耗:", L"内存:", L"显卡:", L"键盘:", L"鼠标:",
-            L"型号:", L"显卡温度:", L"显卡频率:", L"显卡功耗:", L"显存:", L"帧率:", L"1% Low:", L"Codex 5h:", L"Codex 7d:"};
+            L"型号:", L"显卡温度:", L"显卡频率:", L"显卡功耗:", L"显存:", L"帧率:", L"1% Low:"};
         for (unsigned i = 0; i < OverlayMetric::Count; ++i) {
             s.visibleMetrics = 1u << i;
             const auto single = FormatOverlayText(PreviewSample(), s);
@@ -255,11 +367,18 @@ int wmain(int argc, wchar_t** argv) {
         Check(unknownGpu.find(L"显卡温度:--℃") != std::wstring::npos && unknownGpu.find(L"帧率:--FPS") != std::wstring::npos,
             "unavailable GPU sensors and frame rate stay unknown");
         Check(unknownGpu.find(L"1% Low:--FPS") != std::wstring::npos, "insufficient frame history stays unknown for 1 percent low");
-        s.visibleMetrics = OverlayMetric::Codex;
-        Check(FormatOverlayText(PreviewSample(), s) == L"Codex 5h:82% | Codex 7d:64%", "Codex displays remaining percentages with concise window labels");
-        Check(FormatOverlayText(CpuSample{}, s).find(L"--%(读取中)") != std::wstring::npos, "unknown quota is never shown as zero");
-        auto expiredQuota = PreviewSample(); expiredQuota.codex.primary.resetsAt = CodexUnixNow() - 1;
-        Check(FormatOverlayText(expiredQuota, s).find(L"Codex 5h:--%(待更新)") == 0, "expired quota is clearly distinguished in the actual overlay");
+        Check(unknownGpu.find(L"Codex") == std::wstring::npos && OverlayMetric::Count == 15, "retired quota items are absent from the overlay");
+        for (unsigned i = 0; i < OverlayMetric::Count; ++i) {
+            OverlaySettings original; original.visibleMetrics = 1u << i;
+            const auto expected = FormatOverlayText(PreviewSample(), original);
+            auto renamed = original; renamed.metricLabels[i] = L"自定义 " + std::to_wstring(i);
+            Check(FormatOverlayText(PreviewSample(), renamed) == renamed.metricLabels[i] + expected.substr(expected.find(L':')),
+                "each custom key preserves its original value and unit");
+        }
+        s = {}; s.visibleMetrics = OverlayMetric::CpuUsage | OverlayMetric::Mouse;
+        s.metricLabels[0] = L"CPU:Total"; s.metricLabels[7] = L"鼠标电池";
+        std::swap(s.metricOrder[0], s.metricOrder[7]);
+        Check(FormatOverlayText(PreviewSample(), s) == L"鼠标电池:49% | CPU:Total:12.3%", "custom keys follow identity through reordering");
         s.visibleMetrics = OverlayMetric::GpuMemory;
         Check(FormatOverlayText(PreviewSample(), s) == L"显存:6.0GB", "VRAM overlay shows used capacity only");
         Check(FormatOverlayText(CpuSample{}, s) == L"显存:--GB", "missing VRAM use never falls back to total capacity");
@@ -298,6 +417,12 @@ int wmain(int argc, wchar_t** argv) {
         auto beforeValues = PreviewSample(), afterValues = PreviewSample();
         beforeValues.usagePercent = beforeValues.memoryPercent = beforeValues.gpuPercent = 12.3;
         afterValues.usagePercent = afterValues.memoryPercent = afterValues.gpuPercent = 56.7;
+        s = {}; s.vertical = 1; s.outlineWidth = 0; s.valueGap = 12;
+        s.visibleMetrics = OverlayMetric::CpuUsage | OverlayMetric::Memory | OverlayMetric::Gpu;
+        s.metricLabels[0] = L"CPU:Total"; s.metricLabels[4] = L"物理内存"; s.metricLabels[5] = L"显卡核心负载";
+        auto renamedBefore = RenderOverlay(beforeValues, 1.5f, 0, 0, s), renamedAfter = RenderOverlay(afterValues, 1.5f, 0, 0, s);
+        Check(renamedBefore && renamedAfter && AlignedValues(ChangedValueStarts(*renamedBefore, *renamedAfter, 6), 3),
+            "renamed labels containing colons still share one vertical value column");
         for (const float dpiScale : {1.0f, 1.5f, 2.0f}) {
             s = {}; s.vertical = 1; s.outlineWidth = 0;
             s.visibleMetrics = OverlayMetric::CpuUsage | OverlayMetric::Memory | OverlayMetric::Gpu | OverlayMetric::GpuTemperature;
@@ -384,6 +509,12 @@ int wmain(int argc, wchar_t** argv) {
         }
         Check(RegisterHotKey(blocker, 13, MOD_CONTROL | MOD_ALT | MOD_SHIFT, VK_F10) != FALSE, "destructor releases shortcut");
         UnregisterHotKey(blocker, 13); DestroyWindow(blocker); DestroyWindow(owner);
+        std::filesystem::path capture;
+        if (argc > 1) capture = std::filesystem::path(argv[1]) / L"name-editor.png";
+        TestNamesDialog(0, false, capture);
+        TestNamesDialog(1, false);
+        TestNamesDialog(2, false);
+        TestNamesDialog(0, true);
     }
     Gdiplus::GdiplusShutdown(token);
     std::cout << checks << " checks, " << failures << " failures\n";

@@ -23,6 +23,12 @@ struct OrderDialog {
     DWORD visibleMetrics;
     HBRUSH background;
 };
+struct NamesDialog {
+    std::array<std::wstring, OverlayMetric::Count> labels;
+    HBRUSH background;
+    std::vector<HFONT> scaledFonts;
+    ~NamesDialog() { for (const auto font : scaledFonts) DeleteObject(font); }
+};
 void OrderButtons(HWND window) {
     const auto selected = SendDlgItemMessageW(window, IDC_ORDER_LIST, LB_GETCURSEL, 0, 0);
     EnableWindow(GetDlgItem(window, IDC_ORDER_UP), selected > 0);
@@ -99,7 +105,7 @@ void PositionControls(HWND window) {
     EnableWindow(GetDlgItem(window, IDC_MARGIN), !custom);
 }
 
-void FitToWorkArea(HWND window, Dialog& d, const RECT& work) {
+void FitToWorkArea(HWND window, std::vector<HFONT>& scaledFonts, const RECT& work) {
     RECT outer{}, client{}; GetWindowRect(window, &outer); GetClientRect(window, &client);
     const int frameWidth = outer.right - outer.left - client.right;
     const int frameHeight = outer.bottom - outer.top - client.bottom;
@@ -121,13 +127,67 @@ void FitToWorkArea(HWND window, Dialog& d, const RECT& work) {
             LOGFONTW font{};
             if (GetObjectW(original, sizeof(font), &font)) {
                 font.lfHeight = scaled(font.lfHeight); font.lfWidth = 0;
-                if (auto resized = CreateFontIndirectW(&font)) { fonts[original] = resized; d.scaledFonts.push_back(resized); }
+                if (auto resized = CreateFontIndirectW(&font)) { fonts[original] = resized; scaledFonts.push_back(resized); }
             }
         }
         if (fonts.count(original)) SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(fonts[original]), FALSE);
         SetWindowPos(control, nullptr, scaled(rect.left), scaled(rect.top), scaled(rect.right - rect.left), scaled(height), SWP_NOZORDER | SWP_NOACTIVATE);
     }
     SetWindowPos(window, nullptr, 0, 0, scaled(client.right) + frameWidth, scaled(client.bottom) + frameHeight, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+void FillNames(HWND window, const NamesDialog& dialog) {
+    for (unsigned i = 0; i < OverlayMetric::Count; ++i)
+        SetDlgItemTextW(window, IDC_LABEL_CPU + i, dialog.labels[i].c_str());
+}
+INT_PTR CALLBACK NamesProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    auto dialog = reinterpret_cast<NamesDialog*>(GetWindowLongPtrW(window, DWLP_USER));
+    if (message == WM_INITDIALOG) {
+        dialog = reinterpret_cast<NamesDialog*>(lParam);
+        SetWindowLongPtrW(window, DWLP_USER, lParam);
+        for (unsigned i = 0; i < OverlayMetric::Count; ++i)
+            SendDlgItemMessageW(window, IDC_LABEL_CPU + i, EM_SETLIMITTEXT, OverlayMetric::MaxLabelLength, 0);
+        FillNames(window, *dialog);
+        MONITORINFO monitor{sizeof(monitor)};
+        GetMonitorInfoW(MonitorFromWindow(GetParent(window), MONITOR_DEFAULTTOPRIMARY), &monitor);
+        FitToWorkArea(window, dialog->scaledFonts, monitor.rcWork);
+        RECT rect{}; GetWindowRect(window, &rect);
+        SetWindowPos(window, nullptr,
+            monitor.rcWork.left + std::max(0L, (monitor.rcWork.right - monitor.rcWork.left - rect.right + rect.left) / 2),
+            monitor.rcWork.top + std::max(0L, (monitor.rcWork.bottom - monitor.rcWork.top - rect.bottom + rect.top) / 2),
+            0, 0, SWP_NOSIZE | SWP_NOZORDER);
+        return TRUE;
+    }
+    if (!dialog) return FALSE;
+    if (message == WM_CTLCOLORDLG) return reinterpret_cast<INT_PTR>(dialog->background);
+    if (message == WM_CTLCOLORSTATIC) {
+        SetTextColor(reinterpret_cast<HDC>(wParam), RGB(30, 41, 59));
+        SetBkColor(reinterpret_cast<HDC>(wParam), RGB(248, 250, 252));
+        return reinterpret_cast<INT_PTR>(dialog->background);
+    }
+    if (message == WM_CLOSE) { EndDialog(window, IDCANCEL); return TRUE; }
+    if (message != WM_COMMAND) return FALSE;
+    const auto id = LOWORD(wParam);
+    if (id == IDCANCEL) { EndDialog(window, IDCANCEL); return TRUE; }
+    if (id == IDC_NAMES_RESET) {
+        dialog->labels = OverlayMetric::DefaultLabels(); FillNames(window, *dialog); return TRUE;
+    }
+    if (id == IDOK) {
+        auto labels = dialog->labels;
+        for (unsigned i = 0; i < OverlayMetric::Count; ++i) {
+            labels[i] = Text(window, IDC_LABEL_CPU + i);
+            if (!OverlayMetric::ValidLabel(labels[i])) {
+                MessageBoxW(window, (std::wstring(OverlayMetric::Names[i]) +
+                    L"的名称需为 1–32 个字符，不能全为空格或包含换行、控制字符。").c_str(), L"请检查显示名称", MB_OK | MB_ICONWARNING);
+                SetFocus(GetDlgItem(window, IDC_LABEL_CPU + i));
+                SendDlgItemMessageW(window, IDC_LABEL_CPU + i, EM_SETSEL, 0, -1);
+                return TRUE;
+            }
+        }
+        dialog->labels = std::move(labels);
+        EndDialog(window, IDOK); return TRUE;
+    }
+    return FALSE;
 }
 
 void Fill(HWND window, Dialog& d) {
@@ -243,7 +303,7 @@ INT_PTR CALLBACK Procedure(HWND window, UINT message, WPARAM wParam, LPARAM lPar
         Fill(window, *d);
         POINT cursor{}; GetCursorPos(&cursor);
         MONITORINFO monitor{sizeof(monitor)}; GetMonitorInfoW(MonitorFromPoint(cursor, MONITOR_DEFAULTTOPRIMARY), &monitor);
-        FitToWorkArea(window, *d, monitor.rcWork);
+        FitToWorkArea(window, d->scaledFonts, monitor.rcWork);
         RECT rect{}; GetWindowRect(window, &rect);
         SetWindowPos(window, nullptr, monitor.rcWork.left + std::max(0L, (monitor.rcWork.right - monitor.rcWork.left - (rect.right - rect.left)) / 2),
             monitor.rcWork.top + std::max(0L, (monitor.rcWork.bottom - monitor.rcWork.top - (rect.bottom - rect.top)) / 2), 0, 0, SWP_NOSIZE | SWP_NOZORDER);
@@ -289,6 +349,17 @@ INT_PTR CALLBACK Procedure(HWND window, UINT message, WPARAM wParam, LPARAM lPar
     case WM_COMMAND: {
         const int id = LOWORD(wParam), notification = HIWORD(wParam);
         if (id == IDCANCEL) { EndDialog(window, IDCANCEL); return TRUE; }
+        if (id == IDC_EDIT_NAMES) {
+            NamesDialog names{d->current.metricLabels, d->background, {}};
+            const auto result = DialogBoxParamW(reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(window, GWLP_HINSTANCE)),
+                MAKEINTRESOURCEW(IDD_METRIC_NAMES), window, NamesProcedure, reinterpret_cast<LPARAM>(&names));
+            if (result == IDOK) {
+                d->current.metricLabels = std::move(names.labels);
+                InvalidateRect(GetDlgItem(window, IDC_PREVIEW), nullptr, TRUE);
+                SetDlgItemTextW(window, IDC_SETTINGS_STATUS, L"显示名称已修改；点击“应用”或“确定”保存。");
+            } else if (result == -1) MessageBoxW(window, L"无法打开显示名称设置。", L"CpuOverlay", MB_OK | MB_ICONERROR);
+            return TRUE;
+        }
         if (id == IDC_EDIT_ORDER) {
             OrderDialog order{d->current.metricOrder, 0, d->background};
             for (unsigned i = 0; i < OverlayMetric::Count; ++i)
