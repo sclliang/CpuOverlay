@@ -31,7 +31,7 @@ constexpr UINT kTray = WM_APP + 1, kSample = WM_APP + 2;
 constexpr UINT kShow = WM_APP + 3, kHide = WM_APP + 4, kToggle = WM_APP + 5, kMenu = WM_APP + 6;
 constexpr UINT kSettings = WM_APP + 7, kTrayId = 1;
 constexpr UINT kTopmost = WM_APP + 8;
-enum Command : UINT { Toggle = 100, Startup, About, Exit, RetryHotkey, Settings, Corner = 200, Size = 300, Layout = 400, Monitor = 1000 };
+enum Command : UINT { Toggle = 100, Startup, About, Exit, RetryHotkey, Settings, CodexStatus, Corner = 200, Size = 300, Layout = 400, Monitor = 1000 };
 
 std::wstring ReadString(const wchar_t* key, const wchar_t* name) {
     DWORD bytes = 0;
@@ -104,6 +104,21 @@ void WriteJsonText(std::ostream& file, const std::wstring& text) {
         else file << static_cast<char>(c);
     }
     file << '"';
+}
+int WriteCodexDiagnostics(const wchar_t* path) {
+    std::ofstream file{std::filesystem::path(path)};
+    if (!file) return 2;
+    const auto sample = QueryCodexQuota();
+    // Only quota numbers and status are exported. No credentials or account IDs.
+    file << "{\"state\": "; WriteJsonText(file, CodexQuotaStateText(sample.state));
+    file << ", \"win32_error\": " << sample.error << ", \"plan\": "; WriteJsonText(file, sample.plan);
+    auto window = [&file](const char* key, const CodexQuotaWindow& value) {
+        file << ", \"" << key << "\": {\"remaining_percent\": ";
+        if (value.remainingPercent) file << *value.remainingPercent; else file << "null";
+        file << ", \"duration_minutes\": " << value.durationMinutes << ", \"resets_at\": " << value.resetsAt << '}';
+    };
+    window("primary", sample.primary); window("secondary", sample.secondary); file << "}\n";
+    return file.good() ? (sample.state == CodexQuotaState::Ready ? 0 : 3) : 2;
 }
 void WriteGpuJson(std::ostream& file, const GpuSample& sample) {
     file << "{\"name\": "; WriteJsonText(file, sample.name);
@@ -213,7 +228,7 @@ int WriteDiagnostics(const wchar_t* path) {
     if (!file) return 2;
     CpuSampler sampler;
     sampler.Prime();
-    file << "{\n  \"version\": \"1.9.2.0\",\n  \"elevated\": " << (IsElevated() ? "true" : "false")
+    file << "{\n  \"version\": \"1.10.0.0\",\n  \"elevated\": " << (IsElevated() ? "true" : "false")
          << ",\n  \"sample_interval_ms\": 1000,\n  \"samples\": [\n";
     bool valid = true;
     for (int i = 0; i < 4; ++i) {
@@ -332,6 +347,7 @@ public:
 
 private:
     void StopWorker() {
+        codex_.SetActive(false);
         pump_.SetActive(false);
         { std::lock_guard<std::mutex> lock(mutex_); stop_ = true; }
         condition_.notify_all();
@@ -397,13 +413,46 @@ private:
         }
     }
 
-    CpuSample Latest() { std::lock_guard<std::mutex> lock(mutex_); return latest_; }
+    CpuSample Latest() {
+        CpuSample sample;
+        { std::lock_guard<std::mutex> lock(mutex_); sample = latest_; }
+        sample.codex = codex_.Snapshot();
+        return sample;
+    }
+
+    void UpdateCodexActivity() {
+        const auto& settings = preview_ ? *preview_ : settings_;
+        codex_.SetActive(visible_ && !suspended_ && (settings.visibleMetrics & OverlayMetric::Codex));
+    }
+
+    void ShowCodexStatus() {
+        const auto sample = codex_.Snapshot();
+        std::wstring text = std::wstring(L"状态：") + CodexQuotaStateText(sample.state);
+        if (!sample.plan.empty()) text += L"\n账户方案：" + sample.plan;
+        auto window = [&text, &sample](const CodexQuotaWindow& value, bool secondary) {
+            text += L"\n\n" + CodexQuotaLabel(value, secondary) + L"：" + CodexQuotaValue(value, sample.state);
+            if (value.resetsAt) {
+                const auto ticks = (static_cast<ULONGLONG>(value.resetsAt) + 11644473600ULL) * 10000000ULL;
+                FILETIME time{static_cast<DWORD>(ticks), static_cast<DWORD>(ticks >> 32)};
+                SYSTEMTIME utc{}, local{};
+                if (FileTimeToSystemTime(&time, &utc) && SystemTimeToTzSpecificLocalTime(nullptr, &utc, &local)) {
+                    wchar_t formatted[64]{};
+                    swprintf_s(formatted, L"\n重置时间：%04u-%02u-%02u %02u:%02u（本地）", local.wYear, local.wMonth, local.wDay, local.wHour, local.wMinute);
+                    text += formatted;
+                }
+            }
+        };
+        window(sample.primary, false); window(sample.secondary, true);
+        if (sample.updatedMs) text += L"\n\n上次成功更新：" + std::to_wstring((GetTickCount64() - sample.updatedMs) / 1000) + L" 秒前";
+        text += L"\n\n每 60 秒查询；隐藏悬浮窗、关闭两项或休眠时暂停。\n请先在本机 Codex 中登录 ChatGPT。";
+        MessageBoxW(controller_, text.c_str(), L"Codex 余量详情", MB_OK | MB_ICONINFORMATION);
+    }
 
     void UpdatePumpStatusText() {
         // Non-visible controller title exposes read-only integration diagnostics.
         const auto status = pump_.Snapshot();
         std::wostringstream text;
-        text << L"CpuOverlay 1.9.2.0 | overlay=" << (visible_ ? L"visible" : L"hidden")
+        text << L"CpuOverlay 1.10.0.0 | overlay=" << (visible_ ? L"visible" : L"hidden")
              << L" | pump=" << (!settings_.pumpEnabled ? L"disabled" : !status.active ? L"paused" : status.connected ? L"connected" : L"disconnected")
              << L" | sent=" << status.sent << L" | temperature=";
         if (status.temperatureC) text << *status.temperatureC; else text << L"--";
@@ -417,6 +466,7 @@ private:
         bool active;
         { std::lock_guard<std::mutex> lock(mutex_); suspended_ = suspended; ++generation_; active = pumpEnabled_ && !suspended_; }
         pump_.SetActive(active);
+        UpdateCodexActivity();
         condition_.notify_all();
     }
     void ConfigureRuntimeSettings() {
@@ -429,6 +479,7 @@ private:
 
     void SetSampling(bool active) {
         { std::lock_guard<std::mutex> lock(mutex_); sampling_ = active; ++generation_; latest_ = {}; }
+        UpdateCodexActivity();
         condition_.notify_all();
     }
 
@@ -449,6 +500,7 @@ private:
     }
 
     bool Render() {
+        UpdateCodexActivity();
         if (dragging_) return true;
         const auto& settings = preview_ ? *preview_ : settings_;
         const auto monitors = ListMonitors();
@@ -590,6 +642,7 @@ private:
         HMENU menu = CreatePopupMenu(), positions = CreatePopupMenu(), sizes = CreatePopupMenu(), displays = CreatePopupMenu(), layouts = CreatePopupMenu();
         AppendMenuW(menu, MF_STRING, Toggle, (std::wstring(visible_ ? L"隐藏监控\t" : L"显示监控\t") + ShortcutText(settings_)).c_str());
         AppendMenuW(menu, MF_STRING, Settings, L"设置…（快捷键 / 外观 / 自定义位置）");
+        AppendMenuW(menu, MF_STRING, CodexStatus, L"Codex 余量详情…");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         const wchar_t* corners[] = {L"右上角", L"左上角", L"右下角", L"左下角", L"顶部居中"};
         for (UINT i = 0; i < 5; ++i) AppendMenuW(positions, MF_STRING | (settings_.position == i ? MF_CHECKED : 0), Corner + i, corners[i]);
@@ -625,13 +678,14 @@ private:
         DestroyMenu(menu);
         if (selected == Toggle) SetVisible(!visible_);
         else if (selected == Settings) OpenSettings();
+        else if (selected == CodexStatus) ShowCodexStatus();
         else if (selected == Exit) PostMessageW(controller_, WM_CLOSE, 0, 0);
         else if (selected == Startup) {
             const auto status = SetStartup(!StartupEnabled());
             if (status != ERROR_SUCCESS) ShowError(L"无法修改开机自启设置。", status);
         } else if (selected == RetryHotkey) RegisterShortcut();
         else if (selected == About) {
-            const std::wstring help = L"CpuOverlay 1.9.2.0\n\n" + ShortcutText(settings_) +
+            const std::wstring help = L"CpuOverlay 1.10.0.0\n\n" + ShortcutText(settings_) +
                 L"：显示 / 隐藏；单击托盘图标也可切换。\n"
                 L"右键托盘 → 设置：快捷键、横/纵排列、自定义坐标及拖动定位。\n"
                 L"可调整字体、字号、粗细、颜色、不透明度、间距和描边。\n"
@@ -647,6 +701,7 @@ private:
                 L"1% Low：最近 10 秒最慢 1% 帧的平均耗时换算，至少 100 个帧间隔。\n"
                 L"键鼠：罗技、雷蛇、迈丛、ROG、IMECOO、ATK、泰度及 VGN 的已适配协议。\n"
                 L"键鼠电量每 30 秒查询；支持范围见安装说明。\n"
+                L"Codex：账户短期 / 长期剩余百分比，每 60 秒查询；托盘可查看重置时间。\n"
                 L"设置 → 调整显示顺序：选择指标后上移/下移，应用后保存。\n"
                 L"文字外观与刷新：可分别设置项目间距、标签与数值间距。\n"
                 L"未更新 / 断开：保留上次电量，不代表当前实时读数。\n"
@@ -754,6 +809,7 @@ private:
     int refreshIntervalMs_ = 1000;
     unsigned long long generation_ = 0;
     CpuSample latest_;
+    CodexQuotaMonitor codex_;
     PumpDisplay pump_;
 };
 }
@@ -774,6 +830,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int) {
     if (has(L"--battery-diagnostics")) { const auto path = output(L"--battery-diagnostics"); return path.empty() ? 2 : WriteBatteryDiagnostics(path.c_str()); }
     if (has(L"--graphics-diagnostics")) { const auto path = output(L"--graphics-diagnostics"); return path.empty() ? 2 : WriteGraphicsDiagnostics(path.c_str()); }
     if (has(L"--pump-diagnostics")) { const auto path = output(L"--pump-diagnostics"); return path.empty() ? 2 : WritePumpDiagnostics(path.c_str()); }
+    if (has(L"--codex-diagnostics")) { const auto path = output(L"--codex-diagnostics"); return path.empty() ? 2 : WriteCodexDiagnostics(path.c_str()); }
     ULONG_PTR gdiplus = 0;
     Gdiplus::GdiplusStartupInput gdiplusInput;
     if (Gdiplus::GdiplusStartup(&gdiplus, &gdiplusInput, nullptr) != Gdiplus::Ok) return 1;

@@ -6,6 +6,7 @@
 #include "peripheral_battery.h"
 #include "gpu_sampler.h"
 #include "frame_rate_monitor.h"
+#include "codex_quota.h"
 
 struct CpuSample {
     std::optional<double> usagePercent;
@@ -18,6 +19,7 @@ struct CpuSample {
     unsigned gpuEngineCount = 0;
     PawnSample hardware;
     PeripheralSample peripherals;
+    CodexQuotaSample codex;
     const char* frequencySource = "unavailable";
     const char* usageSource = "unavailable";
     std::optional<double> energyMeterMilliwatts;

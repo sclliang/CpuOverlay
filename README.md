@@ -6,7 +6,7 @@
 
 **轻量、直观、可定制的 Windows 桌面性能悬浮窗**
 
-CPU · 内存 · GPU · 游戏帧率 · 键鼠电量 · 水冷温度数显
+CPU · 内存 · GPU · 游戏帧率 · 键鼠电量 · Codex 余量 · 水冷温度数显
 
 <p>
   <a href="https://github.com/sclliang/CpuOverlay/releases/latest"><img src="https://img.shields.io/github/v/release/sclliang/CpuOverlay?display_name=tag&amp;label=%E6%9C%80%E6%96%B0%E5%8F%91%E5%B8%83&amp;color=79c74b&amp;style=flat-square" alt="最新发布"></a>
@@ -23,7 +23,7 @@ CPU · 内存 · GPU · 游戏帧率 · 键鼠电量 · 水冷温度数显
 
 CpuOverlay 将常用硬件指标直接显示在桌面上。透明背景、鼠标穿透、置顶显示，按一下快捷键即可显示或隐藏；从日常办公到窗口化游戏，都能随时查看电脑状态。
 
-主程序使用 C++ / Win32，运行时无需安装 .NET 或 VC++ 运行库。正常运行不联网、不保存监控历史。当前源码版本为 **1.9.2.0**。
+主程序使用 C++ / Win32，运行时无需安装 .NET 或 VC++ 运行库，不保存监控历史。硬件监控在本机完成；启用 Codex 余量时，通过本机已登录的 Codex 联网查询账户额度。当前源码版本为 **1.10.0.0**。
 
 ## ✨ 功能一览
 
@@ -32,7 +32,8 @@ CpuOverlay 将常用硬件指标直接显示在桌面上。透明背景、鼠标
 | 🖥️ **CPU 与内存** | 处理器占用、频率、温度、封装功耗和物理内存占用 |
 | 🎮 **GPU 与游戏帧率** | 显卡型号、占用、温度、频率、功耗、显存用量，以及前台程序的 FPS 和 1% Low |
 | 🔋 **键鼠电量** | 匹配设备的电量、充电状态，以及未更新或断开提示；支持范围见[外设兼容清单](docs/PERIPHERAL_BATTERY.md) |
-| 🎨 **自由排版** | 15 项指标独立开关、调整顺序、横向或纵向排列、字体、颜色、描边、透明度和间距 |
+| 📊 **Codex 余量** | 短期与长期剩余百分比（通常 5h / 7d），后台每 60 秒查询，托盘可查看重置时间；详见 [Codex 监控说明](docs/CODEX_QUOTA.md) |
+| 🎨 **自由排版** | 17 项指标独立开关、调整顺序、横向或纵向排列、字体、颜色、描边、透明度和间距 |
 | 📍 **位置与多屏** | 预设位置、自定义坐标、拖动定位、显示器选择和 DPI 缩放 |
 | ⌨️ **快捷操作** | 默认 `Alt + F1` 显示 / 隐藏，也可自定义热键或使用托盘菜单 |
 | 💧 **水冷温度数显** | 向已适配的乔思伯 USB 数显屏发送 CPU 温度，可在设置中独立启用 |
@@ -81,6 +82,7 @@ CpuOverlay 将常用硬件指标直接显示在桌面上。透明背景、鼠标
 | [安装与使用指南](docs/USAGE.md) | 安装升级、显示设置、预览、登录自启、权限和命令行 |
 | [数据来源与硬件兼容性](docs/HARDWARE.md) | CPU 支持家族、指标含义、数据来源及缺测处理 |
 | [GPU、帧率与游戏置顶](docs/GRAPHICS.md) | 多显卡选择、FPS / 1% Low 算法、置顶行为与验证 |
+| [Codex 余量监控](docs/CODEX_QUOTA.md) | 本机登录、余量周期、重置时间、异常状态及诊断 |
 | [键盘和鼠标电量](docs/PERIPHERAL_BATTERY.md) | 具体设备、VID/PID、读取协议及实机验证范围 |
 | [乔思伯水冷数显屏](docs/PUMP_DISPLAY.md) | 适配设备、开关、温度报文与后台运行行为 |
 | [构建、发布与验证](docs/BUILD.md) | 开发环境、构建命令、测试、发布结构与诊断 |
@@ -99,10 +101,10 @@ Set-Location CpuOverlay
 输出位于 `package/`。脚本会下载并校验固定版本的官方 PawnIO 安装器；GPU 桥接库和 PresentMon 源码已随仓库提供。详细测试与发布命令见 [构建文档](docs/BUILD.md)。
 
 <details>
-<summary><strong>运行现有的七组自动测试</strong></summary>
+<summary><strong>运行现有的八组自动测试</strong></summary>
 
 ```powershell
-cmake --build build --config Release --target CpuOverlaySensorTests CpuOverlaySettingsTests CpuOverlayBatteryTests CpuOverlayVendorBatteryTests CpuOverlayPumpTests CpuOverlayGpuTests CpuOverlayFrameRateTests
+cmake --build build --config Release --target CpuOverlaySensorTests CpuOverlaySettingsTests CpuOverlayBatteryTests CpuOverlayVendorBatteryTests CpuOverlayPumpTests CpuOverlayGpuTests CpuOverlayFrameRateTests CpuOverlayCodexTests
 ctest --test-dir build -C Release --output-on-failure
 ```
 

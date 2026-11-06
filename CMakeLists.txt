@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(CpuOverlay VERSION 1.9.2.0 LANGUAGES CXX RC)
+project(CpuOverlay VERSION 1.10.0.0 LANGUAGES CXX RC)
 
 if(NOT WIN32 OR NOT MSVC)
   message(FATAL_ERROR "Build CpuOverlay with MSVC on Windows.")
@@ -15,13 +15,14 @@ add_executable(CpuOverlay WIN32
   src/main.cpp src/cpu_sampler.cpp src/overlay_renderer.cpp src/pawn_sensors.cpp src/startup.cpp
   src/overlay_settings.cpp src/settings_dialog.cpp src/peripheral_battery.cpp src/pump_display.cpp
   src/gpu_sampler.cpp src/frame_rate_monitor.cpp src/frame_rate_estimator.cpp src/overlay_zorder.cpp
+  src/codex_quota.cpp
   resources/CpuOverlay.rc)
 target_compile_features(CpuOverlay PRIVATE cxx_std_17)
 target_include_directories(CpuOverlay PRIVATE "${CMAKE_SOURCE_DIR}/third_party/pawnio")
 target_compile_definitions(CpuOverlay PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
 target_compile_options(CpuOverlay PRIVATE /W4 /permissive- /utf-8 /EHsc)
 set_property(TARGET CpuOverlay PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-target_link_libraries(CpuOverlay PRIVATE CpuOverlayPresentMon dxgi dwmapi user32 gdi32 gdiplus shell32 advapi32 pdh powrprof shcore ole32 oleaut32 taskschd uuid comctl32 comdlg32 hid setupapi)
+target_link_libraries(CpuOverlay PRIVATE CpuOverlayPresentMon dxgi dwmapi user32 gdi32 gdiplus shell32 advapi32 pdh powrprof shcore ole32 oleaut32 taskschd uuid comctl32 comdlg32 hid setupapi windowsapp)
 target_link_options(CpuOverlay PRIVATE /MANIFEST:NO)
 set_target_properties(CpuOverlay PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_SOURCE_DIR}/package"
@@ -71,6 +72,16 @@ target_link_libraries(CpuOverlayProbe PRIVATE user32 gdi32)
 
 # Hardware-independent checks for CPU selection, temperature conversion and power.
 enable_testing()
+add_executable(CpuOverlayCodexTests EXCLUDE_FROM_ALL tests/codex_quota_tests.cpp tests/codex_tests.rc src/codex_quota.cpp)
+target_include_directories(CpuOverlayCodexTests PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_compile_features(CpuOverlayCodexTests PRIVATE cxx_std_20)
+target_compile_definitions(CpuOverlayCodexTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
+target_compile_options(CpuOverlayCodexTests PRIVATE /W4 /permissive- /utf-8 /EHsc)
+set_property(TARGET CpuOverlayCodexTests PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+target_link_libraries(CpuOverlayCodexTests PRIVATE windowsapp)
+add_test(NAME CpuOverlayCodexTests COMMAND CpuOverlayCodexTests)
+set_tests_properties(CpuOverlayCodexTests PROPERTIES TIMEOUT 30)
+
 add_executable(CpuOverlaySensorTests EXCLUDE_FROM_ALL tests/sensor_math_tests.cpp tests/sensor_tests.rc)
 target_include_directories(CpuOverlaySensorTests PRIVATE "${CMAKE_SOURCE_DIR}/src")
 target_compile_features(CpuOverlaySensorTests PRIVATE cxx_std_17)

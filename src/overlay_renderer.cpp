@@ -28,7 +28,9 @@ std::vector<std::wstring> Metrics(const CpuSample& sample, const OverlaySettings
         L"显卡温度:" + Value(sample.gpu.temperatureC, 0, L"℃"), L"显卡频率:" + Value(sample.gpu.clockMhz, 0, L"MHz"),
         L"显卡功耗:" + Value(sample.gpu.powerWatts, 1, L"W"),
         L"显存:" + Value(sample.gpu.memoryUsedBytes ? std::optional<double>(*sample.gpu.memoryUsedBytes / 1073741824.0) : std::nullopt, 1, L"GB"),
-        L"帧率:" + Value(sample.frameRate.fps, 0, L"FPS"), L"1% Low:" + Value(sample.frameRate.onePercentLow, 0, L"FPS")};
+        L"帧率:" + Value(sample.frameRate.fps, 0, L"FPS"), L"1% Low:" + Value(sample.frameRate.onePercentLow, 0, L"FPS"),
+        CodexQuotaLabel(sample.codex.primary, false) + L":" + CodexQuotaValue(sample.codex.primary, sample.codex.state),
+        CodexQuotaLabel(sample.codex.secondary, true) + L":" + CodexQuotaValue(sample.codex.secondary, sample.codex.state)};
     std::vector<std::wstring> selected;
     for (const auto i : settings.metricOrder)
         if (i < all.size() && (settings.visibleMetrics & (1u << i))) selected.push_back(all[i]);
@@ -205,6 +207,9 @@ CpuSample PreviewSample() {
     sample.gpu.memoryUsedBytes = 6ULL * 1024 * 1024 * 1024; sample.gpu.memoryTotalBytes = 16ULL * 1024 * 1024 * 1024;
     sample.frameRate.fps = 144;
     sample.frameRate.onePercentLow = 110;
+    sample.codex.primary = {82.0, 300, CodexUnixNow() + 7200};
+    sample.codex.secondary = {64.0, 10080, CodexUnixNow() + 259200};
+    sample.codex.state = CodexQuotaState::Ready;
     UpdateBattery(sample.peripherals.keyboard, BatteryProtocol::Reading{14, false}, true, GetTickCount64(), 0);
     UpdateBattery(sample.peripherals.mouse, BatteryProtocol::Reading{48.6, false}, true, GetTickCount64(), 0);
     return sample;

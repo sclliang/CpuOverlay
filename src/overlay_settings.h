@@ -10,7 +10,9 @@ constexpr DWORD Memory = 1u << 4, Gpu = 1u << 5, Keyboard = 1u << 6, Mouse = 1u 
 constexpr DWORD GpuName = 1u << 8, GpuTemperature = 1u << 9, GpuFrequency = 1u << 10, GpuPower = 1u << 11;
 constexpr DWORD GpuMemory = 1u << 12, Fps = 1u << 13;
 constexpr DWORD LowFps = 1u << 14;
-constexpr unsigned Count = 15;
+constexpr DWORD CodexPrimary = 1u << 15, CodexSecondary = 1u << 16;
+constexpr DWORD Codex = CodexPrimary | CodexSecondary;
+constexpr unsigned Count = 17;
 constexpr DWORD All = (1u << Count) - 1;
 constexpr DWORD AddedMetrics = All & ~0xffu;
 constexpr std::array<DWORD, Count> DefaultOrder() {
@@ -19,7 +21,8 @@ constexpr std::array<DWORD, Count> DefaultOrder() {
     return order;
 }
 inline constexpr const wchar_t* Names[Count] = {L"CPU 占用", L"CPU 频率", L"CPU 温度", L"CPU 功耗",
-    L"内存占用", L"显卡占用", L"键盘电量", L"鼠标电量", L"显卡型号", L"显卡温度", L"显卡频率", L"显卡功耗", L"显存用量", L"前台帧率 FPS", L"1% Low 帧率"};
+    L"内存占用", L"显卡占用", L"键盘电量", L"鼠标电量", L"显卡型号", L"显卡温度", L"显卡频率", L"显卡功耗", L"显存用量", L"前台帧率 FPS", L"1% Low 帧率",
+    L"Codex 短期余量 (5h)", L"Codex 长期余量 (7d)"};
 }
 
 struct OverlaySettings {

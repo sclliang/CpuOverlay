@@ -3,7 +3,8 @@
 #include <iterator>
 
 namespace {
-constexpr wchar_t kValue[] = L"DisplaySettingsV5";
+constexpr wchar_t kValue[] = L"DisplaySettingsV6";
+constexpr unsigned kLegacyMetricCount = 15;
 struct SavedSettings {
     DWORD version = 1, bytes = sizeof(SavedSettings);
     DWORD position, vertical;
@@ -14,8 +15,10 @@ struct SavedSettings {
     wchar_t font[LF_FACESIZE], monitor[CCHDEVICENAME];
 };
 struct SavedSettingsV2 { SavedSettings base; DWORD visibleMetrics = OverlayMetric::All; };
-struct SavedSettingsV4 { SavedSettingsV2 profile; std::array<DWORD, OverlayMetric::Count> order = OverlayMetric::DefaultOrder(); };
+// Freeze historical binary layouts when adding display items.
+struct SavedSettingsV4 { SavedSettingsV2 profile; std::array<DWORD, kLegacyMetricCount> order{}; };
 struct SavedSettingsV5 { SavedSettingsV4 profile; int valueGap = 0; DWORD pumpEnabled = 0; int refreshIntervalMs = 1000; };
+struct SavedSettingsV6 { SavedSettingsV5 legacy; std::array<DWORD, OverlayMetric::Count> order = OverlayMetric::DefaultOrder(); };
 DWORD Dword(const wchar_t* key, const wchar_t* name, DWORD fallback) {
     DWORD value = 0, bytes = sizeof(value);
     return RegGetValueW(HKEY_CURRENT_USER, key, name, RRF_RT_REG_DWORD, nullptr, &value, &bytes) == ERROR_SUCCESS ? value : fallback;
@@ -65,18 +68,19 @@ bool ValidateOverlaySettings(const OverlaySettings& s, std::wstring& error) {
 }
 
 OverlaySettings LoadOverlaySettings(const wchar_t* key) {
-    // Keep V1-V4 intact for rollback. Enable added metrics on a V2 upgrade,
+    // Keep V1-V5 intact for rollback. Enable added metrics on a V2 upgrade,
     // except when the user deliberately hid every metric.
-    for (DWORD version : {5u, 4u, 3u, 2u, 1u}) {
-        SavedSettingsV5 stored{};
+    for (DWORD version : {6u, 5u, 4u, 3u, 2u, 1u}) {
+        SavedSettingsV6 current{};
+        auto& stored = current.legacy;
         auto& saved = stored.profile.profile.base;
-        const DWORD expected = version == 5 ? sizeof(stored) : version == 4 ? sizeof(stored.profile) :
+        const DWORD expected = version == 6 ? sizeof(current) : version == 5 ? sizeof(stored) : version == 4 ? sizeof(stored.profile) :
             version >= 2 ? sizeof(stored.profile.profile) : sizeof(saved);
         DWORD bytes = expected;
-        const auto name = version == 5 ? kValue : version == 4 ? L"DisplaySettingsV4" : version == 3 ? L"DisplaySettingsV3" :
+        const auto name = version == 6 ? kValue : version == 5 ? L"DisplaySettingsV5" : version == 4 ? L"DisplaySettingsV4" : version == 3 ? L"DisplaySettingsV3" :
             version == 2 ? L"DisplaySettingsV2" : L"DisplaySettingsV1";
         if (RegGetValueW(HKEY_CURRENT_USER, key, name, RRF_RT_REG_BINARY,
-            nullptr, &stored, &bytes) != ERROR_SUCCESS || bytes != expected || saved.version != version || saved.bytes != expected) continue;
+            nullptr, &current, &bytes) != ERROR_SUCCESS || bytes != expected || saved.version != version || saved.bytes != expected) continue;
         if (std::find(std::begin(saved.font), std::end(saved.font), L'\0') == std::end(saved.font) ||
             std::find(std::begin(saved.monitor), std::end(saved.monitor), L'\0') == std::end(saved.monitor)) continue;
         OverlaySettings s;
@@ -87,8 +91,19 @@ OverlaySettings LoadOverlaySettings(const wchar_t* key) {
         s.outlineWidth = saved.outlineWidth; s.opacity = saved.opacity; s.gap = saved.gap;
         s.hotkeyModifiers = saved.modifiers; s.hotkeyKey = saved.key;
         s.visibleMetrics = version >= 2 ? stored.profile.profile.visibleMetrics : OverlayMetric::All;
-        if (version >= 4) s.metricOrder = stored.profile.order;
-        if (version == 5) {
+        if (version >= 2 && version < 6 && (s.visibleMetrics & ~((1u << kLegacyMetricCount) - 1))) continue;
+        if (version == 6) s.metricOrder = current.order;
+        else if (version >= 4) {
+            DWORD seen = 0;
+            bool valid = true;
+            for (const auto metric : stored.profile.order) {
+                if (metric >= kLegacyMetricCount || (seen & (1u << metric))) { valid = false; break; }
+                seen |= 1u << metric;
+            }
+            if (!valid) continue;
+            std::copy(stored.profile.order.begin(), stored.profile.order.end(), s.metricOrder.begin());
+        }
+        if (version >= 5) {
             if (stored.pumpEnabled > 1) continue;
             s.valueGap = stored.valueGap;
             s.pumpEnabled = stored.pumpEnabled != 0;
@@ -99,6 +114,7 @@ OverlaySettings LoadOverlaySettings(const wchar_t* key) {
             if (s.visibleMetrics & ~0xffu) continue;
             if (s.visibleMetrics) s.visibleMetrics |= OverlayMetric::AddedMetrics;
         }
+        if (version < 6 && s.visibleMetrics) s.visibleMetrics |= OverlayMetric::Codex;
         s.font = saved.font; s.monitor = saved.monitor;
         std::wstring error;
         if (ValidateOverlaySettings(s, error)) return s;
@@ -116,11 +132,14 @@ OverlaySettings LoadOverlaySettings(const wchar_t* key) {
 LSTATUS SaveOverlaySettings(const OverlaySettings& s, const wchar_t* key) {
     std::wstring error;
     if (!ValidateOverlaySettings(s, error)) return ERROR_INVALID_DATA;
-    SavedSettingsV5 stored{};
+    SavedSettingsV6 current{};
+    auto& stored = current.legacy;
     auto& saved = stored.profile.profile.base;
-    saved.version = 5; saved.bytes = sizeof(stored);
+    saved.version = 6; saved.bytes = sizeof(current);
     stored.profile.profile.visibleMetrics = s.visibleMetrics;
-    stored.profile.order = s.metricOrder;
+    current.order = s.metricOrder;
+    size_t legacyIndex = 0;
+    for (const auto metric : s.metricOrder) if (metric < kLegacyMetricCount) stored.profile.order[legacyIndex++] = metric;
     stored.valueGap = s.valueGap;
     stored.pumpEnabled = s.pumpEnabled ? 1 : 0;
     stored.refreshIntervalMs = s.refreshIntervalMs;
@@ -135,7 +154,7 @@ LSTATUS SaveOverlaySettings(const OverlaySettings& s, const wchar_t* key) {
     LSTATUS result = RegCreateKeyExW(HKEY_CURRENT_USER, key, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &opened, nullptr);
     if (result != ERROR_SUCCESS) return result;
     // One value prevents an interrupted save from leaving a partially applied profile.
-    result = RegSetValueExW(opened, kValue, 0, REG_BINARY, reinterpret_cast<const BYTE*>(&stored), sizeof(stored));
+    result = RegSetValueExW(opened, kValue, 0, REG_BINARY, reinterpret_cast<const BYTE*>(&current), sizeof(current));
     RegCloseKey(opened);
     return result;
 }

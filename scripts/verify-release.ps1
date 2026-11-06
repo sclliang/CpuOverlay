@@ -16,8 +16,8 @@ $fields = @{
     CompanyName = 'sixunited'
     ProductName = 'CpuOverlay'
     FileDescription = 'System Performance, Battery and Cooling Display Monitor'
-    FileVersion = '1.9.2.0'
-    ProductVersion = '1.9.2.0'
+    FileVersion = '1.10.0.0'
+    ProductVersion = '1.10.0.0'
     OriginalFilename = 'CpuOverlay.exe'
     InternalName = 'CpuOverlay'
     LegalCopyright = 'Copyright (c) 2026 sixunited. Author: sclliang'
@@ -237,7 +237,8 @@ Assert-Condition ($LASTEXITCODE -eq 0) 'dumpbin failed.'
 $dlls = @($dependencies | ForEach-Object { if ($_ -match '^\s+([A-Za-z0-9_.-]+\.dll)\s*$') { $Matches[1] } })
 Assert-Condition ($dlls.Count -gt 0) 'No import dependencies found.'
 $systemDlls = @('USER32.dll','GDI32.dll','gdiplus.dll','SHELL32.dll','ADVAPI32.dll','pdh.dll','POWRPROF.dll','api-ms-win-shcore-scaling-l1-1-1.dll','KERNEL32.dll','ole32.dll','OLEAUT32.dll','COMCTL32.dll','COMDLG32.dll','VERSION.dll','HID.DLL','SETUPAPI.dll','dxgi.dll','dwmapi.dll','tdh.dll')
-foreach ($dll in $dlls) { Assert-Condition ($dll -in $systemDlls) "Unexpected runtime dependency: $dll" }
+# WindowsApp.lib uses inbox Windows 10/11 API-set contracts for WinRT and core APIs.
+foreach ($dll in $dlls) { Assert-Condition ($dll -in $systemDlls -or $dll -match '^api-ms-win-core-[a-z0-9-]+\.dll$') "Unexpected runtime dependency: $dll" }
 $setupImports = & $dumpbin /dependents $setupPath
 Assert-Condition ($LASTEXITCODE -eq 0) 'Installer dumpbin failed.'
 $setupDlls = @($setupImports | ForEach-Object { if ($_ -match '^\s+([A-Za-z0-9_.-]+\.dll)\s*$') { $Matches[1] } })
