@@ -16,8 +16,8 @@ $fields = @{
     CompanyName = 'sixunited'
     ProductName = 'CpuOverlay'
     FileDescription = 'System Performance, Battery and Cooling Display Monitor'
-    FileVersion = '1.7.0.0'
-    ProductVersion = '1.7.0.0'
+    FileVersion = '1.9.2.0'
+    ProductVersion = '1.9.2.0'
     OriginalFilename = 'CpuOverlay.exe'
     InternalName = 'CpuOverlay'
     LegalCopyright = 'Copyright (c) 2026 sixunited. Author: sclliang'
@@ -107,6 +107,16 @@ Assert-Condition ([InstallerPayload]::Author($setupPath) -eq 'sclliang') 'Instal
 Assert-Condition ([InstallerPayload]::Hash($setupPath, 101) -eq (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash) 'Installer contains a stale main executable.'
 Assert-Condition ([InstallerPayload]::Hash($setupPath, 106) -eq '1F519A22E47187F70A1379A48CA604981C4FCF694F4E65B734AAA74A9FBA3032') 'Embedded official PawnIO installer hash mismatch.'
 Assert-Condition ([InstallerPayload]::Hash($setupPath, 107) -eq (Get-FileHash -LiteralPath (Join-Path $projectRoot 'README.md')).Hash) 'Installer contains stale documentation.'
+foreach ($gpuPayload in @(
+    @{Name = 'gpu\LhmCpuSensorBridge.dll'; Id = 114}, @{Name = 'gpu\LICENSE-MPL-2.0'; Id = 115},
+    @{Name = 'gpu\LICENSE-PawnIO-Modules-LGPL-2.1'; Id = 116}, @{Name = 'gpu\README.md'; Id = 117},
+    @{Name = 'presentmon\LICENSE.txt'; Id = 118}, @{Name = 'presentmon\README.md'; Id = 119},
+    @{Name = 'voltide\LICENSE.txt'; Id = 120}, @{Name = 'voltide\README.md'; Id = 121})) {
+    $gpuFile = Join-Path (Split-Path $exePath) "bin\$($gpuPayload.Name)"
+    Assert-Condition ([InstallerPayload]::Hash($setupPath, $gpuPayload.Id) -eq (Get-FileHash -LiteralPath $gpuFile).Hash) 'GPU/FPS installer payload mismatch.'
+}
+Assert-Condition ((Get-FileHash -LiteralPath (Join-Path (Split-Path $exePath) 'bin\gpu\LhmCpuSensorBridge.dll')).Hash -eq
+    '696D0C1A178013D88450093E61648C2FF399E4D0941F9B97B18165EA9AD35E61') 'GPU bridge hash mismatch.'
 foreach ($document in @(@{Name = 'COPYING'; Id = 103}, @{Name = 'README.md'; Id = 105})) {
     $documentHash = (Get-FileHash -LiteralPath (Join-Path $projectRoot "third_party\pawnio\$($document.Name)")).Hash
     Assert-Condition ([InstallerPayload]::Hash($setupPath, $document.Id) -eq $documentHash) 'Installer module documentation/license mismatch.'
@@ -217,13 +227,16 @@ try {
 
 $vswherePath = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 $vsPath = & $vswherePath -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+if (-not $vsPath) {
+    $vsPath = & $vswherePath -latest -prerelease -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+}
 $toolVersion = Get-ChildItem -LiteralPath (Join-Path $vsPath 'VC\Tools\MSVC') -Directory | Sort-Object Name -Descending | Select-Object -First 1
 $dumpbin = Join-Path $toolVersion.FullName 'bin\Hostx64\x64\dumpbin.exe'
 $dependencies = & $dumpbin /dependents $exePath
 Assert-Condition ($LASTEXITCODE -eq 0) 'dumpbin failed.'
 $dlls = @($dependencies | ForEach-Object { if ($_ -match '^\s+([A-Za-z0-9_.-]+\.dll)\s*$') { $Matches[1] } })
 Assert-Condition ($dlls.Count -gt 0) 'No import dependencies found.'
-$systemDlls = @('USER32.dll','GDI32.dll','gdiplus.dll','SHELL32.dll','ADVAPI32.dll','pdh.dll','POWRPROF.dll','api-ms-win-shcore-scaling-l1-1-1.dll','KERNEL32.dll','ole32.dll','OLEAUT32.dll','COMCTL32.dll','COMDLG32.dll','VERSION.dll','HID.DLL','SETUPAPI.dll')
+$systemDlls = @('USER32.dll','GDI32.dll','gdiplus.dll','SHELL32.dll','ADVAPI32.dll','pdh.dll','POWRPROF.dll','api-ms-win-shcore-scaling-l1-1-1.dll','KERNEL32.dll','ole32.dll','OLEAUT32.dll','COMCTL32.dll','COMDLG32.dll','VERSION.dll','HID.DLL','SETUPAPI.dll','dxgi.dll','dwmapi.dll','tdh.dll')
 foreach ($dll in $dlls) { Assert-Condition ($dll -in $systemDlls) "Unexpected runtime dependency: $dll" }
 $setupImports = & $dumpbin /dependents $setupPath
 Assert-Condition ($LASTEXITCODE -eq 0) 'Installer dumpbin failed.'
@@ -247,6 +260,7 @@ $report = [ordered]@{
     installer_version_info = 'PASS'
     embedded_main_and_official_pawnio_installer = 'PASS'
     installer_dll_dependencies = $setupDlls
+    gpu_bridge_and_presentmon_payload = 'PASS'
 }
 $report | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $artifactPath 'release-report.json') -Encoding UTF8
 $report | ConvertTo-Json -Depth 4

@@ -3,3 +3,7 @@
 /package/
 /.vs/
 *.user
+
+# .NET 桥接工程的本地构建缓存
+**/obj/
+/third_party/librehardwaremonitor/bridge-source/bin/

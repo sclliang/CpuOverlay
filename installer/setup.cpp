@@ -172,7 +172,7 @@ void Report(const Options& options, const Outcome& outcome) {
     if (options.uninstall && options.report.empty()) return;
     std::error_code error; fs::create_directories(path.parent_path(), error);
     std::ofstream file(path);
-    file << "{\n  \"version\": \"1.7.0.0\",\n  \"success\": " << (outcome.success ? "true" : "false")
+    file << "{\n  \"version\": \"1.9.2.0\",\n  \"success\": " << (outcome.success ? "true" : "false")
         << ",\n  \"target\": \"" << Json(options.target.wstring()) << "\",\n  \"pawnio_was_present\": " << (outcome.pawnPresent ? "true" : "false")
         << ",\n  \"pawnio_installed_now\": " << (outcome.pawnInstalled ? "true" : "false")
         << ",\n  \"error\": \"" << Json(outcome.error) << "\"\n}\n";
@@ -189,7 +189,10 @@ void Uninstall(const Options& options) {
         L"bin\\pawnio\\AMDFamily17.bin", L"bin\\pawnio\\AMDFamily17.p",
         L"bin\\pawnio\\AMDFamily0F.bin", L"bin\\pawnio\\AMDFamily0F.p",
         L"bin\\pawnio\\AMDFamily10.bin", L"bin\\pawnio\\AMDFamily10.p",
-        L"bin\\pawnio\\README.md", L"bin\\docs\\README.md", L"bin\\install-report.json"};
+        L"bin\\pawnio\\README.md", L"bin\\docs\\README.md", L"bin\\install-report.json",
+        L"bin\\gpu\\LhmCpuSensorBridge.dll", L"bin\\gpu\\LICENSE-MPL-2.0", L"bin\\gpu\\LICENSE-PawnIO-Modules-LGPL-2.1",
+        L"bin\\gpu\\README.md", L"bin\\presentmon\\LICENSE.txt", L"bin\\presentmon\\README.md",
+        L"bin\\voltide\\LICENSE.txt", L"bin\\voltide\\README.md"};
     for (const auto relative : files) {
         const auto path = options.target / relative;
         Require(DeleteFileW(path.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND, L"无法删除程序文件：" + path.wstring());
@@ -205,6 +208,9 @@ void Uninstall(const Options& options) {
     else DeleteFileW(uninstaller.c_str());
     RemoveDirectoryW((options.target / L"bin" / L"pawnio").c_str());
     RemoveDirectoryW((options.target / L"bin" / L"docs").c_str());
+    RemoveDirectoryW((options.target / L"bin" / L"gpu").c_str());
+    RemoveDirectoryW((options.target / L"bin" / L"presentmon").c_str());
+    RemoveDirectoryW((options.target / L"bin" / L"voltide").c_str());
     // PawnIO is a shared system component. Uninstalling this app never removes its driver.
 }
 
@@ -250,13 +256,21 @@ Outcome Perform(const Options& options, HWND progress) {
         Extract(113, options.target / L"bin" / L"pawnio" / L"AMDFamily10.p");
         Extract(105, options.target / L"bin" / L"pawnio" / L"README.md");
         Extract(107, options.target / L"bin" / L"docs" / L"README.md");
+        Extract(114, options.target / L"bin" / L"gpu" / L"LhmCpuSensorBridge.dll");
+        Extract(115, options.target / L"bin" / L"gpu" / L"LICENSE-MPL-2.0");
+        Extract(116, options.target / L"bin" / L"gpu" / L"LICENSE-PawnIO-Modules-LGPL-2.1");
+        Extract(117, options.target / L"bin" / L"gpu" / L"README.md");
+        Extract(118, options.target / L"bin" / L"presentmon" / L"LICENSE.txt");
+        Extract(119, options.target / L"bin" / L"presentmon" / L"README.md");
+        Extract(120, options.target / L"bin" / L"voltide" / L"LICENSE.txt");
+        Extract(121, options.target / L"bin" / L"voltide" / L"README.md");
         const auto uninstall = options.target / L"bin" / L"CpuOverlay-Setup.exe";
         if (_wcsicmp(SelfPath().c_str(), uninstall.c_str()) != 0)
             Require(CopyFileW(SelfPath().c_str(), uninstall.c_str(), FALSE) != FALSE, L"无法创建卸载程序。");
         stage(75, L"正在配置快捷方式和登录自启…");
         Require(Run(main, options.startup ? L"--enable-startup" : L"--disable-startup") == 0, L"登录自启配置失败。");
         WriteRegistry(kUninstallKey, L"DisplayName", L"CpuOverlay");
-        WriteRegistry(kUninstallKey, L"DisplayVersion", L"1.7.0.0");
+        WriteRegistry(kUninstallKey, L"DisplayVersion", L"1.9.2.0");
         WriteRegistry(kUninstallKey, L"Publisher", L"sixunited");
         WriteRegistry(kUninstallKey, L"InstallLocation", options.target.wstring());
         WriteRegistry(kUninstallKey, L"DisplayIcon", main.wstring());
@@ -295,7 +309,7 @@ bool Confirm(Options& options) {
         TASKDIALOGCONFIG dialog{sizeof(dialog)};
         dialog.dwFlags = TDF_SIZE_TO_CONTENT | (options.startup ? TDF_VERIFICATION_FLAG_CHECKED : 0);
         dialog.pszWindowTitle = L"CpuOverlay 安装";
-        dialog.pszMainInstruction = L"安装 CpuOverlay 1.7.0.0";
+        dialog.pszMainInstruction = L"安装 CpuOverlay 1.9.2.0";
         dialog.pszContent = content.c_str(); dialog.pszVerificationText = L"登录 Windows 后自动运行";
         dialog.pButtons = buttons; dialog.cButtons = ARRAYSIZE(buttons); dialog.nDefaultButton = 100;
         int selected = 0; BOOL checked = FALSE;

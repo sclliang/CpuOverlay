@@ -18,6 +18,61 @@ struct Dialog {
     bool filling = false;
     ~Dialog() { for (const auto font : scaledFonts) DeleteObject(font); DeleteObject(background); }
 };
+struct OrderDialog {
+    std::array<DWORD, OverlayMetric::Count> order;
+    DWORD visibleMetrics;
+    HBRUSH background;
+};
+void OrderButtons(HWND window) {
+    const auto selected = SendDlgItemMessageW(window, IDC_ORDER_LIST, LB_GETCURSEL, 0, 0);
+    EnableWindow(GetDlgItem(window, IDC_ORDER_UP), selected > 0);
+    EnableWindow(GetDlgItem(window, IDC_ORDER_DOWN), selected >= 0 && selected + 1 < OverlayMetric::Count);
+}
+void FillOrder(HWND window, const OrderDialog& dialog, LRESULT selected = 0) {
+    SendDlgItemMessageW(window, IDC_ORDER_LIST, LB_RESETCONTENT, 0, 0);
+    for (const auto metric : dialog.order) {
+        std::wstring label = OverlayMetric::Names[metric];
+        if (!(dialog.visibleMetrics & (1u << metric))) label += L"（隐藏）";
+        SendDlgItemMessageW(window, IDC_ORDER_LIST, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+    }
+    SendDlgItemMessageW(window, IDC_ORDER_LIST, LB_SETCURSEL, selected, 0);
+    OrderButtons(window);
+}
+INT_PTR CALLBACK OrderProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    auto dialog = reinterpret_cast<OrderDialog*>(GetWindowLongPtrW(window, DWLP_USER));
+    if (message == WM_INITDIALOG) {
+        dialog = reinterpret_cast<OrderDialog*>(lParam);
+        SetWindowLongPtrW(window, DWLP_USER, lParam);
+        FillOrder(window, *dialog);
+        RECT owner{}, rect{}; GetWindowRect(GetParent(window), &owner); GetWindowRect(window, &rect);
+        SetWindowPos(window, nullptr, owner.left + (owner.right - owner.left - rect.right + rect.left) / 2,
+            owner.top + (owner.bottom - owner.top - rect.bottom + rect.top) / 2, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+        return TRUE;
+    }
+    if (!dialog) return FALSE;
+    if (message == WM_CTLCOLORDLG) return reinterpret_cast<INT_PTR>(dialog->background);
+    if (message == WM_CTLCOLORSTATIC) {
+        SetTextColor(reinterpret_cast<HDC>(wParam), RGB(30, 41, 59));
+        SetBkColor(reinterpret_cast<HDC>(wParam), RGB(248, 250, 252));
+        return reinterpret_cast<INT_PTR>(dialog->background);
+    }
+    if (message == WM_CLOSE) { EndDialog(window, IDCANCEL); return TRUE; }
+    if (message != WM_COMMAND) return FALSE;
+    const auto id = LOWORD(wParam);
+    if (id == IDOK || id == IDCANCEL) { EndDialog(window, id); return TRUE; }
+    if (id == IDC_ORDER_LIST && HIWORD(wParam) == LBN_SELCHANGE) { OrderButtons(window); return TRUE; }
+    if (id == IDC_ORDER_RESET) { dialog->order = OverlayMetric::DefaultOrder(); FillOrder(window, *dialog); return TRUE; }
+    if (id == IDC_ORDER_UP || id == IDC_ORDER_DOWN) {
+        const auto selected = SendDlgItemMessageW(window, IDC_ORDER_LIST, LB_GETCURSEL, 0, 0);
+        const auto next = selected + (id == IDC_ORDER_UP ? -1 : 1);
+        if (selected >= 0 && next >= 0 && next < OverlayMetric::Count) {
+            std::swap(dialog->order[static_cast<size_t>(selected)], dialog->order[static_cast<size_t>(next)]);
+            FillOrder(window, *dialog, next);
+        }
+        return TRUE;
+    }
+    return FALSE;
+}
 
 std::wstring Text(HWND window, int id) {
     wchar_t buffer[256]{};
@@ -85,6 +140,7 @@ void Fill(HWND window, Dialog& d) {
     if ((s.hotkeyKey >= VK_PRIOR && s.hotkeyKey <= VK_DOWN) || s.hotkeyKey == VK_INSERT || s.hotkeyKey == VK_DELETE) modifiers |= HOTKEYF_EXT;
     SendDlgItemMessageW(window, IDC_HOTKEY, HKM_SETHOTKEY, MAKEWORD(s.hotkeyKey, modifiers), 0);
     CheckDlgButton(window, IDC_WINKEY, s.hotkeyModifiers & MOD_WIN ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(window, IDC_PUMP_ENABLED, s.pumpEnabled ? BST_CHECKED : BST_UNCHECKED);
     for (unsigned i = 0; i < OverlayMetric::Count; ++i)
         CheckDlgButton(window, IDC_METRIC_CPU + i, s.visibleMetrics & (1u << i) ? BST_CHECKED : BST_UNCHECKED);
     SendDlgItemMessageW(window, IDC_LAYOUT, CB_SETCURSEL, s.vertical, 0);
@@ -98,6 +154,8 @@ void Fill(HWND window, Dialog& d) {
     CheckDlgButton(window, IDC_ITALIC, s.italic ? BST_CHECKED : BST_UNCHECKED);
     ColorText(window, IDC_COLOR, s.color); ColorText(window, IDC_OUTLINE_COLOR, s.outlineColor);
     SetDlgItemInt(window, IDC_OPACITY, s.opacity, FALSE); SetDlgItemInt(window, IDC_GAP, s.gap, FALSE);
+    SetDlgItemInt(window, IDC_VALUE_GAP, s.valueGap, FALSE);
+    SetDlgItemInt(window, IDC_REFRESH_INTERVAL, s.refreshIntervalMs, FALSE);
     SetDlgItemInt(window, IDC_OUTLINE, s.outlineWidth, FALSE);
     PositionControls(window);
     d.filling = false;
@@ -106,6 +164,7 @@ void Fill(HWND window, Dialog& d) {
 
 bool Read(HWND window, Dialog& d, OverlaySettings& s, bool report) {
     s = d.current;
+    s.pumpEnabled = IsDlgButtonChecked(window, IDC_PUMP_ENABLED) == BST_CHECKED;
     auto fail = [window, report](const std::wstring& text) {
         if (report) MessageBoxW(window, text.c_str(), L"请检查设置", MB_OK | MB_ICONWARNING);
         return false;
@@ -127,7 +186,8 @@ bool Read(HWND window, Dialog& d, OverlaySettings& s, bool report) {
         BOOL valid = FALSE; value = static_cast<int>(GetDlgItemInt(window, id, &valid, FALSE)); return valid != FALSE;
     };
     if (!number(IDC_X, s.x) || !number(IDC_Y, s.y) || !number(IDC_MARGIN, s.margin) || !number(IDC_POINTS, s.fontPoints) ||
-        !number(IDC_OPACITY, s.opacity) || !number(IDC_GAP, s.gap) || !number(IDC_OUTLINE, s.outlineWidth)) return fail(L"请在数值输入框中填写完整的非负整数。");
+        !number(IDC_OPACITY, s.opacity) || !number(IDC_GAP, s.gap) || !number(IDC_VALUE_GAP, s.valueGap) ||
+        !number(IDC_REFRESH_INTERVAL, s.refreshIntervalMs) || !number(IDC_OUTLINE, s.outlineWidth)) return fail(L"请在数值输入框中填写完整的非负整数。");
     if (!ReadColor(window, IDC_COLOR, s.color) || !ReadColor(window, IDC_OUTLINE_COLOR, s.outlineColor)) return fail(L"颜色格式应为 #RRGGBB，例如 #FFFF00。");
     s.font = Text(window, IDC_FONT);
     s.bold = IsDlgButtonChecked(window, IDC_BOLD) == BST_CHECKED;
@@ -159,7 +219,7 @@ INT_PTR CALLBACK Procedure(HWND window, UINT message, WPARAM wParam, LPARAM lPar
         d = reinterpret_cast<Dialog*>(lParam); SetWindowLongPtrW(window, DWLP_USER, lParam);
         SendDlgItemMessageW(window, IDC_HOTKEY, HKM_SETRULES, 0, 0);
         for (int id : {IDC_COLOR, IDC_OUTLINE_COLOR}) SendDlgItemMessageW(window, id, EM_SETLIMITTEXT, 7, 0);
-        for (int id : {IDC_X, IDC_Y, IDC_MARGIN, IDC_POINTS, IDC_GAP, IDC_OUTLINE, IDC_OPACITY}) SendDlgItemMessageW(window, id, EM_SETLIMITTEXT, 5, 0);
+        for (int id : {IDC_X, IDC_Y, IDC_MARGIN, IDC_POINTS, IDC_GAP, IDC_VALUE_GAP, IDC_REFRESH_INTERVAL, IDC_OUTLINE, IDC_OPACITY}) SendDlgItemMessageW(window, id, EM_SETLIMITTEXT, 5, 0);
         SendDlgItemMessageW(window, IDC_FONT, CB_LIMITTEXT, LF_FACESIZE - 1, 0);
         auto add = [window](int id, const wchar_t* text) { SendDlgItemMessageW(window, id, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text)); };
         add(IDC_LAYOUT, L"横向显示"); add(IDC_LAYOUT, L"纵向显示");
@@ -229,6 +289,18 @@ INT_PTR CALLBACK Procedure(HWND window, UINT message, WPARAM wParam, LPARAM lPar
     case WM_COMMAND: {
         const int id = LOWORD(wParam), notification = HIWORD(wParam);
         if (id == IDCANCEL) { EndDialog(window, IDCANCEL); return TRUE; }
+        if (id == IDC_EDIT_ORDER) {
+            OrderDialog order{d->current.metricOrder, 0, d->background};
+            for (unsigned i = 0; i < OverlayMetric::Count; ++i)
+                if (IsDlgButtonChecked(window, IDC_METRIC_CPU + i) == BST_CHECKED) order.visibleMetrics |= 1u << i;
+            if (DialogBoxParamW(reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(window, GWLP_HINSTANCE)),
+                MAKEINTRESOURCEW(IDD_METRIC_ORDER), window, OrderProcedure, reinterpret_cast<LPARAM>(&order)) == IDOK) {
+                d->current.metricOrder = order.order;
+                InvalidateRect(GetDlgItem(window, IDC_PREVIEW), nullptr, TRUE);
+                SetDlgItemTextW(window, IDC_SETTINGS_STATUS, L"显示顺序已调整；点击“应用”或“确定”保存。");
+            }
+            return TRUE;
+        }
         if (id == IDC_CHOOSE_COLOR || id == IDC_CHOOSE_OUTLINE) { Choose(window, id == IDC_CHOOSE_COLOR ? IDC_COLOR : IDC_OUTLINE_COLOR); return TRUE; }
         if (id == IDC_RESET) {
             d->current = {}; Fill(window, *d); SetDlgItemTextW(window, IDC_SETTINGS_STATUS, L"已恢复默认值；点击“应用”或“确定”保存。"); return TRUE;

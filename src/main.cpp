@@ -9,6 +9,7 @@
 #include "settings_dialog.h"
 #include "startup.h"
 #include "pump_display.h"
+#include "overlay_zorder.h"
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
@@ -29,6 +30,7 @@ constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Ru
 constexpr UINT kTray = WM_APP + 1, kSample = WM_APP + 2;
 constexpr UINT kShow = WM_APP + 3, kHide = WM_APP + 4, kToggle = WM_APP + 5, kMenu = WM_APP + 6;
 constexpr UINT kSettings = WM_APP + 7, kTrayId = 1;
+constexpr UINT kTopmost = WM_APP + 8;
 enum Command : UINT { Toggle = 100, Startup, About, Exit, RetryHotkey, Settings, Corner = 200, Size = 300, Layout = 400, Monitor = 1000 };
 
 std::wstring ReadString(const wchar_t* key, const wchar_t* name) {
@@ -81,13 +83,73 @@ void ShowError(const wchar_t* action, DWORD error) {
     MessageBoxW(nullptr, message.c_str(), L"CpuOverlay", MB_OK | MB_ICONERROR);
 }
 
+void WriteJsonText(std::ostream& file, const std::wstring& text);
 void WriteBatteryJson(std::ostream& file, const BatterySample& s) {
     file << "{\"percent\": ";
     if (s.percent) file << std::fixed << std::setprecision(1) << *s.percent; else file << "null";
     file << ", \"state\": \"" << BatteryStateName(s.state) << "\", \"charging\": " << (s.charging ? "true" : "false")
          << ", \"age_ms\": ";
     if (s.percent) file << GetTickCount64() - s.updatedMs; else file << "null";
-    file << ", \"win32_error\": " << s.error << "}";
+    file << ", \"win32_error\": " << s.error << ", \"model\": "; WriteJsonText(file, BatteryModelName(s));
+    file << ", \"vendor_id\": " << s.vendorId << ", \"product_id\": " << s.productId << "}";
+}
+void WriteJsonText(std::ostream& file, const std::wstring& text) {
+    const int bytes = WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
+    std::string utf8(static_cast<size_t>(bytes), 0);
+    WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), utf8.data(), bytes, nullptr, nullptr);
+    file << '"';
+    for (const unsigned char c : utf8) {
+        if (c == '\\' || c == '"') file << '\\' << static_cast<char>(c);
+        else if (c < 32) file << ' ';
+        else file << static_cast<char>(c);
+    }
+    file << '"';
+}
+void WriteGpuJson(std::ostream& file, const GpuSample& sample) {
+    file << "{\"name\": "; WriteJsonText(file, sample.name);
+    auto value = [&file](const char* key, const auto& number) {
+        file << ", \"" << key << "\": ";
+        if (number) file << *number; else file << "null";
+    };
+    value("temperature_c", sample.temperatureC); value("clock_mhz", sample.clockMhz);
+    value("power_watts", sample.powerWatts); value("sensor_load_percent", sample.loadPercent);
+    value("memory_used_bytes", sample.memoryUsedBytes);
+    file << ", \"temperature_sensor\": "; WriteJsonText(file, sample.temperatureSensor);
+    file << ", \"clock_sensor\": "; WriteJsonText(file, sample.clockSensor);
+    file << ", \"power_sensor\": "; WriteJsonText(file, sample.powerSensor);
+    file << ", \"memory_total_bytes\": " << sample.memoryTotalBytes << ", \"adapter_luid\": " << sample.luid
+         << ", \"vendor_id\": " << sample.vendorId << ", \"sensor_source\": \"" << sample.sensorSource
+         << "\", \"memory_source\": \"windows_gpu_adapter_memory\", \"win32_error\": " << sample.error << "}";
+}
+void WriteFrameRateJson(std::ostream& file, const FrameRateSample& sample) {
+    file << "{\"fps\": ";
+    if (sample.fps) file << *sample.fps; else file << "null";
+    file << ", \"one_percent_low_fps\": ";
+    if (sample.onePercentLow) file << *sample.onePercentLow; else file << "null";
+    file << ", \"low_window_seconds\": 10, \"frame_intervals\": " << sample.intervalCount;
+    file << ", \"process_id\": " << sample.processId << ", \"etw_running\": " << (sample.running ? "true" : "false")
+         << ", \"win32_error\": " << sample.error << ", \"source\": \"presentmon_application_presents\"}";
+}
+int WriteGraphicsDiagnostics(const wchar_t* path) {
+    std::ofstream file{std::filesystem::path(path)};
+    if (!file) return 2;
+    GpuSampler gpu;
+    FrameRateMonitor frames;
+    frames.Collect();
+    file << "{\"elevated\": " << (IsElevated() ? "true" : "false") << ", \"samples\": [";
+    bool valid = true;
+    for (int i = 0; i < 6; ++i) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        const auto sample = gpu.Collect();
+        const auto fps = frames.Collect();
+        if (i) file << ',';
+        file << "{\"gpu\": "; WriteGpuJson(file, sample);
+        file << ", \"frame_rate\": "; WriteFrameRateJson(file, fps); file << '}';
+        valid = valid && !sample.name.empty() && fps.running;
+    }
+    frames.Pause();
+    file << "]}\n";
+    return file.good() ? (valid ? 0 : 3) : 2;
 }
 int WriteBatteryDiagnostics(const wchar_t* path) {
     std::ofstream file{std::filesystem::path(path)};
@@ -95,15 +157,17 @@ int WriteBatteryDiagnostics(const wchar_t* path) {
     PeripheralBatteryMonitor monitor;
     monitor.SetActive(true);
     PeripheralSample sample;
-    for (int i = 0; i < 50; ++i) {
+    // Discovering an uncached K75M may need to probe all six paired Bolt slots.
+    for (int i = 0; i < 800; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         sample = monitor.Snapshot();
-        if (sample.keyboard.state == BatteryState::Fresh && sample.mouse.state == BatteryState::Fresh) break;
+        if ((sample.keyboard.state == BatteryState::Fresh || sample.keyboard.error) &&
+            (sample.mouse.state == BatteryState::Fresh || sample.mouse.error)) break;
     }
     monitor.SetActive(false);
-    file << "{\"keyboard_model\": \"VGN V98Pro V4 (391D:2A04)\", \"keyboard\": ";
+    file << "{\"keyboard_model\": "; WriteJsonText(file, BatteryModelName(sample.keyboard)); file << ", \"keyboard\": ";
     WriteBatteryJson(file, sample.keyboard);
-    file << ", \"mouse_model\": \"Razer Viper V3 HyperSpeed (1532:00B8)\", \"mouse\": ";
+    file << ", \"mouse_model\": "; WriteJsonText(file, BatteryModelName(sample.mouse)); file << ", \"mouse\": ";
     WriteBatteryJson(file, sample.mouse);
     file << "}\n";
     return file.good() ? (sample.keyboard.state == BatteryState::Fresh && sample.mouse.state == BatteryState::Fresh ? 0 : 3) : 2;
@@ -149,7 +213,7 @@ int WriteDiagnostics(const wchar_t* path) {
     if (!file) return 2;
     CpuSampler sampler;
     sampler.Prime();
-    file << "{\n  \"version\": \"1.7.0.0\",\n  \"elevated\": " << (IsElevated() ? "true" : "false")
+    file << "{\n  \"version\": \"1.9.2.0\",\n  \"elevated\": " << (IsElevated() ? "true" : "false")
          << ",\n  \"sample_interval_ms\": 1000,\n  \"samples\": [\n";
     bool valid = true;
     for (int i = 0; i < 4; ++i) {
@@ -173,6 +237,8 @@ int WriteDiagnostics(const wchar_t* path) {
         if (sample.energyMeterMilliwatts) file << *sample.energyMeterMilliwatts; else file << "null";
         number("memory_percent", sample.memoryPercent);
         number("gpu_percent", sample.gpuPercent);
+        file << ", \"gpu\": "; WriteGpuJson(file, sample.gpu);
+        file << ", \"frame_rate\": "; WriteFrameRateJson(file, sample.frameRate);
         file << ", \"keyboard_battery\": "; WriteBatteryJson(file, sample.peripherals.keyboard);
         file << ", \"mouse_battery\": "; WriteBatteryJson(file, sample.peripherals.mouse);
         file << std::fixed << std::setprecision(3);
@@ -203,6 +269,7 @@ class Application {
 public:
     explicit Application(HINSTANCE instance) : instance_(instance) {}
     ~Application() {
+        if (foregroundHook_) UnhookWinEvent(foregroundHook_);
         StopWorker();
         shortcut_.reset();
         if (controller_) { DeleteTray(); DestroyWindow(controller_); }
@@ -237,13 +304,16 @@ public:
             GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
         AddTray();
         SetTimer(controller_, 1, 10000, nullptr);
+        SetTimer(controller_, 2, 500, nullptr);
+        foregroundHook_ = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr,
+            ForegroundChanged, 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
         RegisterShortcut();
         bool firstRun = ReadDword(L"Initialized", 0) == 0;
         if (!noAutostart && (firstRun || StartupEnabled())) {
             const auto status = SetStartup(true);
             if (status != ERROR_SUCCESS) ShowError(L"开机自启设置失败，程序仍可正常使用。", status);
         }
-        pump_.SetActive(true);
+        ConfigureRuntimeSettings();
         try { worker_ = std::thread(&Application::Worker, this); }
         catch (...) { MessageBoxW(nullptr, L"无法启动 CPU 采样线程。", L"CpuOverlay", MB_OK | MB_ICONERROR); return 1; }
         if (show) SetVisible(true);
@@ -273,10 +343,15 @@ private:
         try {
             CpuSampler sampler;
             auto previous = PumpProtocol::Sampling::Idle;
+            ULONGLONG nextInfo = 0, nextPump = 0;
+            unsigned long long scheduledGeneration = 0;
             std::unique_lock<std::mutex> lock(mutex_);
             while (!stop_) {
                 const auto generation = generation_;
-                const auto mode = PumpProtocol::SamplingMode(suspended_, sampling_, pump_.Snapshot().connected);
+                const bool needsPump = pumpEnabled_ && pump_.Snapshot().connected;
+                const auto mode = PumpProtocol::SamplingMode(suspended_, sampling_, needsPump, pumpEnabled_);
+                const auto refresh = refreshIntervalMs_;
+                if (scheduledGeneration != generation) { nextInfo = nextPump = 0; scheduledGeneration = generation; }
                 lock.unlock();
                 if (mode != previous) {
                     if (mode == PumpProtocol::Sampling::Full) sampler.Prime();
@@ -286,16 +361,33 @@ private:
                     }
                 }
                 CpuSample sample;
-                if (mode == PumpProtocol::Sampling::Full) sample = sampler.Collect();
-                else if (mode == PumpProtocol::Sampling::TemperatureOnly) sample.hardware = sampler.CollectHardware();
-                pump_.Update(sample.hardware.temperatureC);
+                const auto now = GetTickCount64();
+                const bool haveInfo = mode == PumpProtocol::Sampling::Full && now >= nextInfo;
+                const bool haveTemperature = (mode == PumpProtocol::Sampling::TemperatureOnly ||
+                    (mode == PumpProtocol::Sampling::Full && needsPump)) && now >= nextPump;
+                if (haveInfo) {
+                    sample = sampler.Collect();
+                    nextInfo = std::max(GetTickCount64() + 1, now + static_cast<ULONGLONG>(refresh));
+                    nextPump = GetTickCount64() + 1000;
+                    pump_.Update(sample.hardware.temperatureC);
+                } else if (haveTemperature) {
+                    sample.hardware = sampler.CollectHardware();
+                    nextPump = GetTickCount64() + 1000;
+                    pump_.Update(sample.hardware.temperatureC);
+                } else if (mode == PumpProtocol::Sampling::Idle || mode == PumpProtocol::Sampling::Paused)
+                    pump_.Update({});
                 previous = mode;
                 lock.lock();
                 if (!stop_ && generation == generation_) {
-                    if (sampling_) latest_ = sample;
-                    PostMessageW(controller_, kSample, 0, 0);
+                    if (sampling_ && haveInfo) latest_ = sample;
+                    if (haveInfo || !sampling_) PostMessageW(controller_, kSample, 0, 0);
                 }
-                condition_.wait_for(lock, std::chrono::seconds(1), [this, generation] { return stop_ || generation_ != generation; });
+                ULONGLONG delay = 1000;
+                const auto tick = GetTickCount64();
+                if (mode == PumpProtocol::Sampling::Full) delay = std::min(delay, nextInfo > tick ? nextInfo - tick : 1);
+                if (mode == PumpProtocol::Sampling::TemperatureOnly || (mode == PumpProtocol::Sampling::Full && needsPump))
+                    delay = std::min(delay, nextPump > tick ? nextPump - tick : 1);
+                condition_.wait_for(lock, std::chrono::milliseconds(delay), [this, generation] { return stop_ || generation_ != generation; });
             }
             sampler.Pause();
         } catch (...) {
@@ -311,17 +403,27 @@ private:
         // Non-visible controller title exposes read-only integration diagnostics.
         const auto status = pump_.Snapshot();
         std::wostringstream text;
-        text << L"CpuOverlay 1.7.0.0 | overlay=" << (visible_ ? L"visible" : L"hidden")
-             << L" | pump=" << (!status.active ? L"paused" : status.connected ? L"connected" : L"disconnected")
+        text << L"CpuOverlay 1.9.2.0 | overlay=" << (visible_ ? L"visible" : L"hidden")
+             << L" | pump=" << (!settings_.pumpEnabled ? L"disabled" : !status.active ? L"paused" : status.connected ? L"connected" : L"disconnected")
              << L" | sent=" << status.sent << L" | temperature=";
         if (status.temperatureC) text << *status.temperatureC; else text << L"--";
         text << L" | last_sent_ms=" << status.lastSentMs << L" | error=" << status.error;
+        text << L" | refresh_ms=" << settings_.refreshIntervalMs;
+        text << L" | pump_active=" << (status.active ? 1 : 0) << L" | pump_connected=" << (status.connected ? 1 : 0);
         SetWindowTextW(controller_, text.str().c_str());
     }
 
     void SetSuspended(bool suspended) {
-        { std::lock_guard<std::mutex> lock(mutex_); suspended_ = suspended; ++generation_; }
-        pump_.SetActive(!suspended);
+        bool active;
+        { std::lock_guard<std::mutex> lock(mutex_); suspended_ = suspended; ++generation_; active = pumpEnabled_ && !suspended_; }
+        pump_.SetActive(active);
+        condition_.notify_all();
+    }
+    void ConfigureRuntimeSettings() {
+        bool active;
+        { std::lock_guard<std::mutex> lock(mutex_); pumpEnabled_ = settings_.pumpEnabled;
+            refreshIntervalMs_ = settings_.refreshIntervalMs; ++generation_; active = pumpEnabled_ && !suspended_; }
+        pump_.SetActive(active);
         condition_.notify_all();
     }
 
@@ -377,7 +479,7 @@ private:
         const int width = static_cast<int>(bitmap->GetWidth()), height = static_cast<int>(bitmap->GetHeight());
         const POINT position = OverlayPosition(settings, work, {width, height}, dpiX);
         // Moving first ensures WM_DPICHANGED is delivered; rendering always uses the selected monitor's DPI.
-        SetWindowPos(overlay_, HWND_TOPMOST, position.x, position.y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+        SetWindowPos(overlay_, nullptr, position.x, position.y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER);
         return PresentOverlay(overlay_, *bitmap, position);
     }
 
@@ -434,7 +536,9 @@ private:
         if (status != ERROR_SUCCESS) {
             shortcut_->Cancel(); error = L"保存配置失败，原设置已保留。错误代码：" + std::to_wstring(status); return false;
         }
+        const bool runtimeChanged = settings_.pumpEnabled != candidate.pumpEnabled || settings_.refreshIntervalMs != candidate.refreshIntervalMs;
         shortcut_->Commit(); settings_ = candidate; preview_.reset(); StopPositioning();
+        if (runtimeChanged) ConfigureRuntimeSettings();
         if (visible_) Render(); UpdateTooltip();
         return true;
     }
@@ -527,22 +631,30 @@ private:
             if (status != ERROR_SUCCESS) ShowError(L"无法修改开机自启设置。", status);
         } else if (selected == RetryHotkey) RegisterShortcut();
         else if (selected == About) {
-            const std::wstring help = L"CpuOverlay 1.7.0.0\n\n" + ShortcutText(settings_) +
+            const std::wstring help = L"CpuOverlay 1.9.2.0\n\n" + ShortcutText(settings_) +
                 L"：显示 / 隐藏；单击托盘图标也可切换。\n"
                 L"右键托盘 → 设置：快捷键、横/纵排列、自定义坐标及拖动定位。\n"
                 L"可调整字体、字号、粗细、颜色、不透明度、间距和描边。\n"
                 L"背景透明、鼠标穿透、置顶，不抢键盘焦点。\n"
-                L"每秒更新；隐藏后暂停采样。\n\n"
+                L"信息刷新间隔可设为 200–5000 毫秒；隐藏后暂停显示项采样。\n\n"
                 L"处理器：所有逻辑处理器的平均忙碌时间占比。\n"
                 L"频率：Windows 性能计数器估算频率。\n"
                 L"温度 / 功耗：Intel / AMD，对应硬件未提供读数时显示 --。\n"
                 L"内存：物理内存使用百分比。\n"
                 L"显卡：Windows GPU 引擎统计中最繁忙的引擎占用。\n"
-                L"键盘 / 鼠标：VGN V98Pro V4、雷蛇 Viper V3 HyperSpeed 电量，每 30 秒查询。\n"
+                L"显卡传感器：型号、核心温度、频率、功耗及独立显存用量。\n"
+                L"帧率：前台进程的 Present 提交速率，无有效样本显示 --。\n"
+                L"1% Low：最近 10 秒最慢 1% 帧的平均耗时换算，至少 100 个帧间隔。\n"
+                L"键鼠：罗技、雷蛇、迈丛、ROG、IMECOO、ATK、泰度及 VGN 的已适配协议。\n"
+                L"键鼠电量每 30 秒查询；支持范围见安装说明。\n"
+                L"设置 → 调整显示顺序：选择指标后上移/下移，应用后保存。\n"
+                L"文字外观与刷新：可分别设置项目间距、标签与数值间距。\n"
                 L"未更新 / 断开：保留上次电量，不代表当前实时读数。\n"
-                L"乔思伯水冷数显屏：自动发送 CPU 摄氏温度，隐藏悬浮窗后继续更新。\n"
+                L"乔思伯水冷数显屏：默认关闭，在设置中勾选并应用后发送 CPU 温度。\n"
+                L"启用数显后，隐藏悬浮窗仍每秒采温，不受信息刷新间隔影响。\n"
                 L"各核心频率可能不同，读数可能与任务管理器不同。\n"
-                L"普通置顶窗口不能保证覆盖独占全屏游戏或安全桌面。\n\n"
+                L"游戏置顶每 500 毫秒检查遮挡并恢复，不抢焦点。\n"
+                L"支持窗口化/无边框全屏；独占全屏和安全桌面无法保证覆盖。\n\n"
                 L"硬件传感器需要已安装 PawnIO 及管理员权限。\n"
                 L"登录自启使用当前用户的最高权限计划任务；可在托盘中取消。\n"
                 L"删除程序前请先取消自启并退出。";
@@ -561,6 +673,9 @@ private:
         }
     }
 
+    static void CALLBACK ForegroundChanged(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) {
+        if (const auto controller = FindWindowW(kControllerClass, nullptr)) PostMessageW(controller, kTopmost, 0, 0);
+    }
     static LRESULT CALLBACK ControllerProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
         auto app = reinterpret_cast<Application*>(GetWindowLongPtrW(window, GWLP_USERDATA));
         if (message == WM_NCCREATE) {
@@ -579,6 +694,7 @@ private:
         case kHide: app->SetVisible(false); return 0;
         case kMenu: app->ShowMenu(); return 0;
         case kSettings: app->OpenSettings(); return 0;
+        case kTopmost: MaintainOverlayTopmost(app->overlay_, app->positioning_ || app->dragging_); return 0;
         case kSample:
             app->UpdatePumpStatusText();
             if (app->visible_) { app->Render(); app->UpdateTooltip(); }
@@ -587,7 +703,10 @@ private:
             if (LOWORD(lParam) == WM_CONTEXTMENU) app->ShowMenu();
             else if (LOWORD(lParam) == NIN_SELECT || LOWORD(lParam) == NIN_KEYSELECT) app->SetVisible(!app->visible_);
             return 0;
-        case WM_TIMER: if (!app->trayAdded_) app->AddTray(); return 0;
+        case WM_TIMER:
+            if (wParam == 2) MaintainOverlayTopmost(app->overlay_, app->positioning_ || app->dragging_);
+            else if (!app->trayAdded_) app->AddTray();
+            return 0;
         case WM_DISPLAYCHANGE: case WM_SETTINGCHANGE:
             if (app->visible_) PostMessageW(window, kSample, 0, 0);
             return 0;
@@ -622,6 +741,7 @@ private:
     HINSTANCE instance_;
     HWND controller_ = nullptr, overlay_ = nullptr, settingsWindow_ = nullptr;
     HICON icon_ = nullptr;
+    HWINEVENTHOOK foregroundHook_ = nullptr;
     UINT taskbarCreated_ = 0;
     bool visible_ = false, trayAdded_ = false, positioning_ = false, dragging_ = false;
     OverlaySettings settings_;
@@ -630,7 +750,8 @@ private:
     std::thread worker_;
     std::mutex mutex_;
     std::condition_variable condition_;
-    bool stop_ = false, sampling_ = false, suspended_ = false;
+    bool stop_ = false, sampling_ = false, suspended_ = false, pumpEnabled_ = false;
+    int refreshIntervalMs_ = 1000;
     unsigned long long generation_ = 0;
     CpuSample latest_;
     PumpDisplay pump_;
@@ -651,6 +772,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int) {
     };
     if (has(L"--diagnostics")) { const auto path = output(L"--diagnostics"); return path.empty() ? 2 : WriteDiagnostics(path.c_str()); }
     if (has(L"--battery-diagnostics")) { const auto path = output(L"--battery-diagnostics"); return path.empty() ? 2 : WriteBatteryDiagnostics(path.c_str()); }
+    if (has(L"--graphics-diagnostics")) { const auto path = output(L"--graphics-diagnostics"); return path.empty() ? 2 : WriteGraphicsDiagnostics(path.c_str()); }
     if (has(L"--pump-diagnostics")) { const auto path = output(L"--pump-diagnostics"); return path.empty() ? 2 : WritePumpDiagnostics(path.c_str()); }
     ULONG_PTR gdiplus = 0;
     Gdiplus::GdiplusStartupInput gdiplusInput;

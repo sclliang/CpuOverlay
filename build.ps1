@@ -8,6 +8,10 @@ $vswherePath = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Insta
 if (-not (Test-Path -LiteralPath $vswherePath)) { throw 'Visual Studio with Desktop development with C++ is required.' }
 $vsJson = & $vswherePath -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -format json
 $vsInfo = @($vsJson | ConvertFrom-Json)[0]
+if (-not $vsInfo) {
+    $vsJson = & $vswherePath -latest -prerelease -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -format json
+    $vsInfo = @($vsJson | ConvertFrom-Json)[0]
+}
 if (-not $vsInfo) { throw 'No Visual Studio C++ toolchain was found.' }
 $vsMajor = ([version]$vsInfo.installationVersion).Major
 $generator = if ($vsMajor -ge 18) { 'Visual Studio 18 2026' } else { 'Visual Studio 17 2022' }

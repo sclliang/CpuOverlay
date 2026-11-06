@@ -12,7 +12,7 @@ std::wstring Value(const std::optional<double>& value, int decimals, const wchar
     swprintf_s(buffer, L"%.*f%s", decimals, *value, unit);
     return buffer;
 }
-std::vector<std::wstring> Metrics(const CpuSample& sample, DWORD visibleMetrics) {
+std::vector<std::wstring> Metrics(const CpuSample& sample, const OverlaySettings& settings) {
     auto battery = [](const BatterySample& s) {
         auto text = Value(s.percent, 0, L"%");
         if (s.state == BatteryState::Disconnected) text += L"(断开)";
@@ -23,23 +23,29 @@ std::vector<std::wstring> Metrics(const CpuSample& sample, DWORD visibleMetrics)
     const std::vector<std::wstring> all{L"处理器:" + Value(sample.usagePercent, 1, L"%"), L"频率:" + Value(sample.frequencyGhz, 2, L"GHz"),
         L"温度:" + Value(sample.hardware.temperatureC, 0, L"℃"), L"功耗:" + Value(sample.hardware.packageWatts, 1, L"W"),
         L"内存:" + Value(sample.memoryPercent, 1, L"%"), L"显卡:" + Value(sample.gpuPercent, 1, L"%"),
-        L"键盘:" + battery(sample.peripherals.keyboard), L"鼠标:" + battery(sample.peripherals.mouse)};
+        L"键盘:" + battery(sample.peripherals.keyboard), L"鼠标:" + battery(sample.peripherals.mouse),
+        L"型号:" + (sample.gpu.name.empty() ? std::wstring(L"--") : sample.gpu.name),
+        L"显卡温度:" + Value(sample.gpu.temperatureC, 0, L"℃"), L"显卡频率:" + Value(sample.gpu.clockMhz, 0, L"MHz"),
+        L"显卡功耗:" + Value(sample.gpu.powerWatts, 1, L"W"),
+        L"显存:" + Value(sample.gpu.memoryUsedBytes ? std::optional<double>(*sample.gpu.memoryUsedBytes / 1073741824.0) : std::nullopt, 1, L"GB"),
+        L"帧率:" + Value(sample.frameRate.fps, 0, L"FPS"), L"1% Low:" + Value(sample.frameRate.onePercentLow, 0, L"FPS")};
     std::vector<std::wstring> selected;
-    for (unsigned i = 0; i < OverlayMetric::Count; ++i) if (visibleMetrics & (1u << i)) selected.push_back(all[i]);
+    for (const auto i : settings.metricOrder)
+        if (i < all.size() && (settings.visibleMetrics & (1u << i))) selected.push_back(all[i]);
     return selected;
 }
 }
 
 std::wstring FormatOverlayText(const CpuSample& sample, const OverlaySettings& settings) {
     std::wstring text;
-    for (const auto& item : Metrics(sample, settings.visibleMetrics)) { if (!text.empty()) text += L" | "; text += item; }
+    for (const auto& item : Metrics(sample, settings)) { if (!text.empty()) text += L" | "; text += item; }
     return text;
 }
 
 std::unique_ptr<Gdiplus::Bitmap> RenderOverlay(const CpuSample& sample, float scale, int maxWidth, int maxHeight,
     const OverlaySettings& settings, bool positioning) {
     if (!std::isfinite(scale) || scale <= 0) return nullptr;
-    auto metrics = Metrics(sample, settings.visibleMetrics);
+    auto metrics = Metrics(sample, settings);
     if (metrics.empty()) {
         if (positioning) metrics.push_back(L"未选择显示项（拖动定位）");
         else {
@@ -58,10 +64,36 @@ std::unique_ptr<Gdiplus::Bitmap> RenderOverlay(const CpuSample& sample, float sc
     const float lineHeight = chosen->GetEmHeight(style) ? em * chosen->GetLineSpacing(style) / chosen->GetEmHeight(style) : em * 1.5f;
     Gdiplus::GraphicsPath path;
     Gdiplus::StringFormat format(Gdiplus::StringFormat::GenericTypographic());
+    Gdiplus::Bitmap measurementSurface(1, 1, PixelFormat32bppPARGB);
+    Gdiplus::Graphics measurement(&measurementSurface);
+    Gdiplus::Font measurementFont(chosen, em, style, Gdiplus::UnitPixel);
+    std::vector<float> labelWidths(metrics.size(), 0);
+    float labelColumnWidth = 0;
+    if (settings.vertical || settings.valueGap > 0) {
+        for (size_t i = 0; i < metrics.size(); ++i) {
+            const auto colon = metrics[i].find(L':');
+            if (colon == std::wstring::npos) continue;
+            Gdiplus::RectF labelBounds;
+            if (measurement.MeasureString(metrics[i].c_str(), static_cast<INT>(colon + 1), &measurementFont,
+                Gdiplus::PointF(0, 0), &format, &labelBounds) != Gdiplus::Ok) return nullptr;
+            labelWidths[i] = labelBounds.Width;
+            labelColumnWidth = std::max(labelColumnWidth, labelWidths[i]);
+        }
+    }
     float x = 0, y = 0;
     for (size_t i = 0; i < metrics.size(); ++i) {
         Gdiplus::GraphicsPath item;
-        if (item.AddString(metrics[i].c_str(), -1, chosen, style, em, Gdiplus::PointF(x, y), &format) != Gdiplus::Ok) return nullptr;
+        const auto colon = metrics[i].find(L':');
+        if ((settings.vertical || settings.valueGap > 0) && colon != std::wstring::npos) {
+            const auto label = metrics[i].substr(0, colon + 1);
+            const auto value = metrics[i].substr(colon + 1);
+            // Every visible row shares one value column, including a zero gap.
+            // Hidden labels do not reserve space; reordering keeps the column stable.
+            const float labelWidth = settings.vertical ? labelColumnWidth : labelWidths[i];
+            if (item.AddString(label.c_str(), -1, chosen, style, em, Gdiplus::PointF(x, y), &format) != Gdiplus::Ok ||
+                item.AddString(value.c_str(), -1, chosen, style, em,
+                    Gdiplus::PointF(x + labelWidth + static_cast<float>(settings.valueGap), y), &format) != Gdiplus::Ok) return nullptr;
+        } else if (item.AddString(metrics[i].c_str(), -1, chosen, style, em, Gdiplus::PointF(x, y), &format) != Gdiplus::Ok) return nullptr;
         Gdiplus::RectF itemBounds; item.GetBounds(&itemBounds); path.AddPath(&item, FALSE);
         if (settings.vertical) y += lineHeight + static_cast<float>(settings.gap);
         else if (i + 1 < metrics.size()) {
@@ -81,8 +113,12 @@ std::unique_ptr<Gdiplus::Bitmap> RenderOverlay(const CpuSample& sample, float sc
     const float logicalHeight = std::max(44.0f, bounds.Height + padding * 2);
     if (maxWidth > 0) scale = std::min(scale, static_cast<float>(maxWidth) / logicalWidth);
     if (maxHeight > 0) scale = std::min(scale, static_cast<float>(maxHeight) / logicalHeight);
-    const int width = static_cast<int>(std::ceil(logicalWidth * scale));
-    const int height = static_cast<int>(std::ceil(logicalHeight * scale));
+    const int scaledWidth = static_cast<int>(std::ceil(logicalWidth * scale));
+    const int scaledHeight = static_cast<int>(std::ceil(logicalHeight * scale));
+    // Floating-point rounding at the limiting scale must not add a pixel
+    // outside the requested work area.
+    const int width = maxWidth > 0 ? std::min(scaledWidth, maxWidth) : scaledWidth;
+    const int height = maxHeight > 0 ? std::min(scaledHeight, maxHeight) : scaledHeight;
     if (width < 1 || height < 1 || static_cast<uint64_t>(width) * height > 32 * 1024 * 1024) return nullptr;
     auto bitmap = std::make_unique<Gdiplus::Bitmap>(width, height, PixelFormat32bppPARGB);
     if (bitmap->GetLastStatus() != Gdiplus::Ok) return nullptr;
@@ -164,6 +200,11 @@ CpuSample PreviewSample() {
     sample.hardware.packageWatts = 42.1;
     sample.memoryPercent = 37.5;
     sample.gpuPercent = 18.0;
+    sample.gpu.name = L"AMD Radeon RX 9070 XT";
+    sample.gpu.temperatureC = 52; sample.gpu.clockMhz = 2450; sample.gpu.powerWatts = 145;
+    sample.gpu.memoryUsedBytes = 6ULL * 1024 * 1024 * 1024; sample.gpu.memoryTotalBytes = 16ULL * 1024 * 1024 * 1024;
+    sample.frameRate.fps = 144;
+    sample.frameRate.onePercentLow = 110;
     UpdateBattery(sample.peripherals.keyboard, BatteryProtocol::Reading{14, false}, true, GetTickCount64(), 0);
     UpdateBattery(sample.peripherals.mouse, BatteryProtocol::Reading{48.6, false}, true, GetTickCount64(), 0);
     return sample;

@@ -22,6 +22,12 @@ int main() {
     check(zero && (*zero)[4] == 0 && (*zero)[5] == 0, "real zero is distinct from missing data");
     check(PumpProtocol::Fresh(100, 3100) && !PumpProtocol::Fresh(100, 3101) && !PumpProtocol::Fresh(200, 100), "stale and invalid timestamps cannot be resent");
     using S = PumpProtocol::Sampling;
+    check(PumpProtocol::SamplingMode(false, false, true, false) == S::Idle,
+        "disabled pump does not keep hidden hardware sampling alive even with a stale connected status");
+    check(PumpProtocol::SamplingMode(false, true, true, false) == S::Full,
+        "disabling pump leaves visible overlay sampling intact");
+    check(PumpProtocol::SamplingMode(true, false, true, false) == S::Paused,
+        "resume cannot override the disabled pump preference");
     check(PumpProtocol::SamplingMode(false, false, true) == S::TemperatureOnly, "hidden overlay still samples for connected pump");
     check(PumpProtocol::SamplingMode(false, true, true) == S::Full && PumpProtocol::SamplingMode(false, true, false) == S::Full,
         "visible overlay retains full sampling regardless of pump");

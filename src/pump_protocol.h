@@ -20,9 +20,9 @@ inline std::optional<Report> TemperatureReport(std::optional<double> celsius) {
 }
 inline bool Fresh(uint64_t updated, uint64_t now) { return now >= updated && now - updated <= 3000; }
 enum class Sampling { Paused, Idle, TemperatureOnly, Full };
-inline Sampling SamplingMode(bool suspended, bool overlayVisible, bool panelConnected) {
+inline Sampling SamplingMode(bool suspended, bool overlayVisible, bool panelConnected, bool enabled = true) {
     if (suspended) return Sampling::Paused;
     if (overlayVisible) return Sampling::Full;
-    return panelConnected ? Sampling::TemperatureOnly : Sampling::Idle;
+    return enabled && panelConnected ? Sampling::TemperatureOnly : Sampling::Idle;
 }
 }

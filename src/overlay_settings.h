@@ -1,13 +1,25 @@
 #pragma once
 #include <windows.h>
+#include <array>
 #include <string>
 #include <vector>
 
 namespace OverlayMetric {
 constexpr DWORD CpuUsage = 1u << 0, Frequency = 1u << 1, Temperature = 1u << 2, Power = 1u << 3;
 constexpr DWORD Memory = 1u << 4, Gpu = 1u << 5, Keyboard = 1u << 6, Mouse = 1u << 7;
-constexpr DWORD All = 0xff;
-constexpr unsigned Count = 8;
+constexpr DWORD GpuName = 1u << 8, GpuTemperature = 1u << 9, GpuFrequency = 1u << 10, GpuPower = 1u << 11;
+constexpr DWORD GpuMemory = 1u << 12, Fps = 1u << 13;
+constexpr DWORD LowFps = 1u << 14;
+constexpr unsigned Count = 15;
+constexpr DWORD All = (1u << Count) - 1;
+constexpr DWORD AddedMetrics = All & ~0xffu;
+constexpr std::array<DWORD, Count> DefaultOrder() {
+    std::array<DWORD, Count> order{};
+    for (unsigned i = 0; i < Count; ++i) order[i] = i;
+    return order;
+}
+inline constexpr const wchar_t* Names[Count] = {L"CPU 占用", L"CPU 频率", L"CPU 温度", L"CPU 功耗",
+    L"内存占用", L"显卡占用", L"键盘电量", L"鼠标电量", L"显卡型号", L"显卡温度", L"显卡频率", L"显卡功耗", L"显存用量", L"前台帧率 FPS", L"1% Low 帧率"};
 }
 
 struct OverlaySettings {
@@ -18,8 +30,12 @@ struct OverlaySettings {
     int bold = 1, italic = 0;
     COLORREF color = RGB(255, 255, 0), outlineColor = RGB(15, 23, 35);
     int outlineWidth = 2, opacity = 100, gap = 8;
+    int valueGap = 0; // Extra logical pixels between the label (including ':') and its value.
+    bool pumpEnabled = false;
+    int refreshIntervalMs = 1000;
     UINT hotkeyModifiers = MOD_ALT, hotkeyKey = VK_F1;
     DWORD visibleMetrics = OverlayMetric::All;
+    std::array<DWORD, OverlayMetric::Count> metricOrder = OverlayMetric::DefaultOrder();
     std::wstring font = L"Microsoft YaHei UI", monitor;
 };
 

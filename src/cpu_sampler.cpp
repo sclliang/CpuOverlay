@@ -4,6 +4,7 @@
 #include <powrprof.h>
 #include <algorithm>
 #include <cmath>
+#include <cwctype>
 #include <vector>
 #include <map>
 #include <string>
@@ -55,7 +56,7 @@ void CpuSampler::OpenCounters() {
     add(L"\\Energy Meter(rapl_package0_pkg)\\Power", packagePower_);
 }
 
-std::optional<double> CpuSampler::ReadGpuUsage(unsigned& engineCount) const {
+std::optional<double> CpuSampler::ReadGpuUsage(unsigned& engineCount, uint64_t adapterLuid) const {
     engineCount = 0;
     if (!gpu_) return {};
     DWORD bytes = 0, count = 0;
@@ -66,11 +67,14 @@ std::optional<double> CpuSampler::ReadGpuUsage(unsigned& engineCount) const {
     auto items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buffer.data());
     if (PdhGetFormattedCounterArrayW(gpu_, format, &bytes, &count, items) != ERROR_SUCCESS) return {};
     std::map<std::wstring, double> engines;
+    const auto adapterKey = GpuCounterKey(adapterLuid);
     for (DWORD i = 0; i < count; ++i) {
         const auto& value = items[i].FmtValue;
         if (!items[i].szName || (value.CStatus != PDH_CSTATUS_VALID_DATA && value.CStatus != PDH_CSTATUS_NEW_DATA) ||
             !std::isfinite(value.doubleValue) || value.doubleValue < 0) continue;
-        const std::wstring name(items[i].szName);
+        std::wstring name(items[i].szName);
+        std::transform(name.begin(), name.end(), name.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+        if (adapterLuid && name.find(adapterKey) == std::wstring::npos) continue;
         const auto luid = name.find(L"luid_");
         const auto type = name.find(L"_engtype_");
         if (luid == std::wstring::npos || type == std::wstring::npos || type <= luid) continue;
@@ -122,12 +126,14 @@ void CpuSampler::Prime() {
     pawn_.Prime();
 }
 
-void CpuSampler::Pause() { batteries_.SetActive(false); }
+void CpuSampler::Pause() { batteries_.SetActive(false); frameRate_.Pause(); }
 
 CpuSample CpuSampler::Collect() {
     CpuSample sample;
     sample.peripherals = batteries_.Snapshot();
     sample.hardware = pawn_.Collect();
+    sample.gpu = gpuSampler_.Collect();
+    sample.frameRate = frameRate_.Collect();
     MEMORYSTATUSEX memory{sizeof(memory)};
     if (GlobalMemoryStatusEx(&memory) && memory.ullTotalPhys && memory.ullAvailPhys <= memory.ullTotalPhys) {
         sample.memoryTotalBytes = memory.ullTotalPhys;
@@ -144,7 +150,7 @@ CpuSample CpuSampler::Collect() {
             // Keep pawnio_status / HRESULT intact so diagnostics still explain
             // why the original backend needed a fallback.
         }
-        sample.gpuPercent = ReadGpuUsage(sample.gpuEngineCount);
+        sample.gpuPercent = ReadGpuUsage(sample.gpuEngineCount, sample.gpu.luid);
         sample.usagePercent = Read(usage_);
         if (sample.usagePercent && *sample.usagePercent >= 0) {
             sample.usagePercent = std::clamp(*sample.usagePercent, 0.0, 100.0);
@@ -168,6 +174,7 @@ CpuSample CpuSampler::Collect() {
         sample.usagePercent = fallbackUsage;
         sample.usageSource = "system_times";
     }
+    if (!sample.gpuPercent) sample.gpuPercent = sample.gpu.loadPercent;
     if (!sample.frequencyGhz) {
         if (const auto mhz = ReportedFrequencyMhz()) {
             sample.frequencyGhz = *mhz / 1000.0;

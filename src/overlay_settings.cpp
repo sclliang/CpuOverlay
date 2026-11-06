@@ -3,7 +3,7 @@
 #include <iterator>
 
 namespace {
-constexpr wchar_t kValue[] = L"DisplaySettingsV2";
+constexpr wchar_t kValue[] = L"DisplaySettingsV5";
 struct SavedSettings {
     DWORD version = 1, bytes = sizeof(SavedSettings);
     DWORD position, vertical;
@@ -14,6 +14,8 @@ struct SavedSettings {
     wchar_t font[LF_FACESIZE], monitor[CCHDEVICENAME];
 };
 struct SavedSettingsV2 { SavedSettings base; DWORD visibleMetrics = OverlayMetric::All; };
+struct SavedSettingsV4 { SavedSettingsV2 profile; std::array<DWORD, OverlayMetric::Count> order = OverlayMetric::DefaultOrder(); };
+struct SavedSettingsV5 { SavedSettingsV4 profile; int valueGap = 0; DWORD pumpEnabled = 0; int refreshIntervalMs = 1000; };
 DWORD Dword(const wchar_t* key, const wchar_t* name, DWORD fallback) {
     DWORD value = 0, bytes = sizeof(value);
     return RegGetValueW(HKEY_CURRENT_USER, key, name, RRF_RT_REG_DWORD, nullptr, &value, &bytes) == ERROR_SUCCESS ? value : fallback;
@@ -36,29 +38,44 @@ bool ValidateOverlaySettings(const OverlaySettings& s, std::wstring& error) {
     else if (s.font.empty() || s.font.size() >= LF_FACESIZE || s.monitor.size() >= CCHDEVICENAME || s.fontPoints < 8 || s.fontPoints > 96)
         error = L"请选择有效字体，字号需在 8–96 磅之间。";
     else if ((s.bold != 0 && s.bold != 1) || (s.italic != 0 && s.italic != 1) || s.outlineWidth < 0 || s.outlineWidth > 6 ||
-        s.opacity < 10 || s.opacity > 100 || s.gap < 0 || s.gap > 40 || s.color > 0xffffff || s.outlineColor > 0xffffff)
-        error = L"不透明度需在 10–100% 之间，间距需在 0–40 之间，描边宽度需在 0–6 之间。";
+        s.opacity < 10 || s.opacity > 100 || s.gap < 0 || s.gap > 40 || s.valueGap < 0 || s.valueGap > 40 ||
+        s.color > 0xffffff || s.outlineColor > 0xffffff)
+        error = L"不透明度需在 10–100% 之间，项目/标签与数值间距需在 0–40 之间，描边宽度需在 0–6 之间。";
     else if (s.visibleMetrics & ~OverlayMetric::All)
         error = L"显示内容包含无效选项。";
+    else if (s.refreshIntervalMs < 200 || s.refreshIntervalMs > 5000)
+        error = L"信息刷新间隔需在 200–5000 毫秒之间。";
     else if ((s.hotkeyModifiers & ~(MOD_ALT | MOD_CONTROL | MOD_SHIFT | MOD_WIN)) || !s.hotkeyKey || s.hotkeyKey > 254 ||
         s.hotkeyKey == VK_F12 || s.hotkeyKey == VK_SHIFT || s.hotkeyKey == VK_CONTROL || s.hotkeyKey == VK_MENU ||
         s.hotkeyKey == VK_LWIN || s.hotkeyKey == VK_RWIN || s.hotkeyKey == VK_ESCAPE || s.hotkeyKey == VK_TAB ||
         s.hotkeyKey == VK_RETURN || s.hotkeyKey == VK_SPACE ||
         (!(s.hotkeyModifiers & (MOD_ALT | MOD_CONTROL | MOD_WIN)) && !(s.hotkeyKey >= VK_F1 && s.hotkeyKey <= VK_F11)))
         error = L"请使用 Ctrl、Alt 或 Win 加一个按键，或 F1–F11。F12 及 Esc、Tab、回车、空格不作为全局快捷键。";
-    else { error.clear(); return true; }
+    else {
+        DWORD seen = 0;
+        for (const auto metric : s.metricOrder) {
+            if (metric >= OverlayMetric::Count || (seen & (1u << metric))) {
+                error = L"显示顺序需包含每个指标且不能重复。"; return false;
+            }
+            seen |= 1u << metric;
+        }
+        error.clear(); return true;
+    }
     return false;
 }
 
 OverlaySettings LoadOverlaySettings(const wchar_t* key) {
-    // Read the current atomic profile first, then the unmodified V1 profile.
-    // Upgrades keep existing appearance/shortcut settings and show all metrics.
-    for (DWORD version : {2u, 1u}) {
-        SavedSettingsV2 stored{};
-        auto& saved = stored.base;
-        const DWORD expected = version == 2 ? sizeof(stored) : sizeof(saved);
+    // Keep V1-V4 intact for rollback. Enable added metrics on a V2 upgrade,
+    // except when the user deliberately hid every metric.
+    for (DWORD version : {5u, 4u, 3u, 2u, 1u}) {
+        SavedSettingsV5 stored{};
+        auto& saved = stored.profile.profile.base;
+        const DWORD expected = version == 5 ? sizeof(stored) : version == 4 ? sizeof(stored.profile) :
+            version >= 2 ? sizeof(stored.profile.profile) : sizeof(saved);
         DWORD bytes = expected;
-        if (RegGetValueW(HKEY_CURRENT_USER, key, version == 2 ? kValue : L"DisplaySettingsV1", RRF_RT_REG_BINARY,
+        const auto name = version == 5 ? kValue : version == 4 ? L"DisplaySettingsV4" : version == 3 ? L"DisplaySettingsV3" :
+            version == 2 ? L"DisplaySettingsV2" : L"DisplaySettingsV1";
+        if (RegGetValueW(HKEY_CURRENT_USER, key, name, RRF_RT_REG_BINARY,
             nullptr, &stored, &bytes) != ERROR_SUCCESS || bytes != expected || saved.version != version || saved.bytes != expected) continue;
         if (std::find(std::begin(saved.font), std::end(saved.font), L'\0') == std::end(saved.font) ||
             std::find(std::begin(saved.monitor), std::end(saved.monitor), L'\0') == std::end(saved.monitor)) continue;
@@ -69,7 +86,19 @@ OverlaySettings LoadOverlaySettings(const wchar_t* key) {
         s.color = saved.color; s.outlineColor = saved.outlineColor;
         s.outlineWidth = saved.outlineWidth; s.opacity = saved.opacity; s.gap = saved.gap;
         s.hotkeyModifiers = saved.modifiers; s.hotkeyKey = saved.key;
-        s.visibleMetrics = version == 2 ? stored.visibleMetrics : OverlayMetric::All;
+        s.visibleMetrics = version >= 2 ? stored.profile.profile.visibleMetrics : OverlayMetric::All;
+        if (version >= 4) s.metricOrder = stored.profile.order;
+        if (version == 5) {
+            if (stored.pumpEnabled > 1) continue;
+            s.valueGap = stored.valueGap;
+            s.pumpEnabled = stored.pumpEnabled != 0;
+            s.refreshIntervalMs = stored.refreshIntervalMs;
+        }
+        if (version == 3 && s.visibleMetrics) s.visibleMetrics |= OverlayMetric::LowFps;
+        if (version == 2) {
+            if (s.visibleMetrics & ~0xffu) continue;
+            if (s.visibleMetrics) s.visibleMetrics |= OverlayMetric::AddedMetrics;
+        }
         s.font = saved.font; s.monitor = saved.monitor;
         std::wstring error;
         if (ValidateOverlaySettings(s, error)) return s;
@@ -87,10 +116,14 @@ OverlaySettings LoadOverlaySettings(const wchar_t* key) {
 LSTATUS SaveOverlaySettings(const OverlaySettings& s, const wchar_t* key) {
     std::wstring error;
     if (!ValidateOverlaySettings(s, error)) return ERROR_INVALID_DATA;
-    SavedSettingsV2 stored{};
-    auto& saved = stored.base;
-    saved.version = 2; saved.bytes = sizeof(stored);
-    stored.visibleMetrics = s.visibleMetrics;
+    SavedSettingsV5 stored{};
+    auto& saved = stored.profile.profile.base;
+    saved.version = 5; saved.bytes = sizeof(stored);
+    stored.profile.profile.visibleMetrics = s.visibleMetrics;
+    stored.profile.order = s.metricOrder;
+    stored.valueGap = s.valueGap;
+    stored.pumpEnabled = s.pumpEnabled ? 1 : 0;
+    stored.refreshIntervalMs = s.refreshIntervalMs;
     saved.position = s.position; saved.vertical = s.vertical;
     saved.x = s.x; saved.y = s.y; saved.margin = s.margin;
     saved.fontPoints = s.fontPoints; saved.bold = s.bold; saved.italic = s.italic;
