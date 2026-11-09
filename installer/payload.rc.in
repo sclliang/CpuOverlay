@@ -24,9 +24,14 @@ LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
 119 RCDATA "@CMAKE_SOURCE_DIR@/third_party/presentmon/README.md"
 120 RCDATA "@CMAKE_SOURCE_DIR@/third_party/voltide/LICENSE.txt"
 121 RCDATA "@CMAKE_SOURCE_DIR@/third_party/voltide/README.md"
+122 RCDATA "$<TARGET_FILE:CpuOverlayGame>"
+123 RCDATA "@CMAKE_SOURCE_DIR@/resources/CpuOverlayGame64.json"
+124 RCDATA "@CMAKE_SOURCE_DIR@/third_party/game_overlay/minhook/LICENSE.txt"
+125 RCDATA "@CMAKE_SOURCE_DIR@/third_party/game_overlay/LICENSE-imgui.txt"
+126 RCDATA "@CMAKE_SOURCE_DIR@/third_party/game_overlay/LICENSE-Vulkan-Headers.txt"
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 1,11,0,0
- PRODUCTVERSION 1,11,0,0
+ FILEVERSION 1,12,0,0
+ PRODUCTVERSION 1,12,0,0
  FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
  FILEFLAGS 0x0L
  FILEOS VOS_NT_WINDOWS32
@@ -40,12 +45,12 @@ BEGIN
    VALUE "CompanyName", "sixunited\0"
    VALUE "Author", "sclliang\0"
    VALUE "FileDescription", "CpuOverlay Installer with PawnIO Driver Setup\0"
-   VALUE "FileVersion", "1.11.0.0\0"
+   VALUE "FileVersion", "1.12.0.0\0"
    VALUE "InternalName", "CpuOverlay-Setup\0"
    VALUE "LegalCopyright", "Copyright (c) 2026 sixunited. Author: sclliang\0"
    VALUE "OriginalFilename", "CpuOverlay-Setup.exe\0"
    VALUE "ProductName", "CpuOverlay\0"
-   VALUE "ProductVersion", "1.11.0.0\0"
+   VALUE "ProductVersion", "1.12.0.0\0"
   END
  END
  BLOCK "VarFileInfo"

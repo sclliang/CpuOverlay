@@ -1,4 +1,5 @@
 /build/
+/build-native/
 /artifacts/
 /package/
 /.vs/

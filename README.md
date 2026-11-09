@@ -6,7 +6,7 @@
 
 **轻量、直观、可定制的 Windows 桌面性能悬浮窗**
 
-CPU · 内存 · GPU · 游戏帧率 · 键鼠电量 · 水冷温度数显
+CPU · 内存 · GPU · 游戏内监控 · 游戏帧率 · 键鼠电量 · 水冷温度数显
 
 <p>
   <a href="https://github.com/sclliang/CpuOverlay/releases/latest"><img src="https://img.shields.io/github/v/release/sclliang/CpuOverlay?display_name=tag&amp;label=%E6%9C%80%E6%96%B0%E5%8F%91%E5%B8%83&amp;color=79c74b&amp;style=flat-square" alt="最新发布"></a>
@@ -23,7 +23,9 @@ CPU · 内存 · GPU · 游戏帧率 · 键鼠电量 · 水冷温度数显
 
 CpuOverlay 将常用硬件指标直接显示在桌面上。透明背景、鼠标穿透、置顶显示，按一下快捷键即可显示或隐藏；从日常办公到窗口化游戏，都能随时查看电脑状态。
 
-主程序使用 C++ / Win32，运行时无需安装 .NET 或 VC++ 运行库。正常运行不联网、不保存监控历史。当前源码版本为 **1.11.0.0**。
+主程序使用 C++ / Win32，运行时无需安装 .NET 或 VC++ 运行库。正常运行不联网、不保存监控历史。当前源码版本为 **1.12.0.0**。
+
+1.12 起内置 **D3D11 / D3D12 / OpenGL / Vulkan** 四个游戏内显示后端，无需 RTSS。自有 64 位叠加模块随程序分发，复用当前外观设置与快捷键；真实游戏兼容性逐款验证中。使用方法见[内置游戏显示](docs/GAME_OVERLAY.md)。
 
 ## ✨ 功能一览
 
@@ -123,7 +125,7 @@ ctest --test-dir build -C Release --output-on-failure
 <details>
 <summary><strong>可以在全屏游戏中显示吗？</strong></summary>
 
-支持窗口化与无边框全屏，并自动恢复被其他置顶窗口遮挡的层级。真正的独占全屏、锁屏和 UAC 安全桌面无法保证覆盖。
+桌面浮窗支持窗口化与无边框全屏，并自动恢复被其他置顶窗口遮挡的层级。另有内置游戏显示用于支持的 64 位图形程序，包括独占全屏的游戏内绘制路径；接入状态和限制见[内置游戏显示](docs/GAME_OVERLAY.md)。锁屏和 UAC 安全桌面不提供覆盖。
 
 </details>
 

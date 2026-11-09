@@ -10,6 +10,7 @@
 #include "startup.h"
 #include "pump_display.h"
 #include "overlay_zorder.h"
+#include "game_overlay_host.h"
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
@@ -213,7 +214,7 @@ int WriteDiagnostics(const wchar_t* path) {
     if (!file) return 2;
     CpuSampler sampler;
     sampler.Prime();
-    file << "{\n  \"version\": \"1.11.0.0\",\n  \"elevated\": " << (IsElevated() ? "true" : "false")
+    file << "{\n  \"version\": \"1.12.0.0\",\n  \"elevated\": " << (IsElevated() ? "true" : "false")
          << ",\n  \"sample_interval_ms\": 1000,\n  \"samples\": [\n";
     bool valid = true;
     for (int i = 0; i < 4; ++i) {
@@ -269,6 +270,7 @@ class Application {
 public:
     explicit Application(HINSTANCE instance) : instance_(instance) {}
     ~Application() {
+        game_.SetVisible(false);
         if (foregroundHook_) UnhookWinEvent(foregroundHook_);
         StopWorker();
         shortcut_.reset();
@@ -314,6 +316,7 @@ public:
             if (status != ERROR_SUCCESS) ShowError(L"开机自启设置失败，程序仍可正常使用。", status);
         }
         ConfigureRuntimeSettings();
+        game_.Configure(settings_.gameOverlayEnabled, settings_.gameOverlayBackends);
         try { worker_ = std::thread(&Application::Worker, this); }
         catch (...) { MessageBoxW(nullptr, L"无法启动 CPU 采样线程。", L"CpuOverlay", MB_OK | MB_ICONERROR); return 1; }
         if (show) SetVisible(true);
@@ -403,13 +406,17 @@ private:
         // Non-visible controller title exposes read-only integration diagnostics.
         const auto status = pump_.Snapshot();
         std::wostringstream text;
-        text << L"CpuOverlay 1.11.0.0 | overlay=" << (visible_ ? L"visible" : L"hidden")
+        text << L"CpuOverlay 1.12.0.0 | overlay=" << (visible_ ? L"visible" : L"hidden")
              << L" | pump=" << (!settings_.pumpEnabled ? L"disabled" : !status.active ? L"paused" : status.connected ? L"connected" : L"disconnected")
              << L" | sent=" << status.sent << L" | temperature=";
         if (status.temperatureC) text << *status.temperatureC; else text << L"--";
         text << L" | last_sent_ms=" << status.lastSentMs << L" | error=" << status.error;
         text << L" | refresh_ms=" << settings_.refreshIntervalMs;
         text << L" | pump_active=" << (status.active ? 1 : 0) << L" | pump_connected=" << (status.connected ? 1 : 0);
+        const auto game = game_.Status();
+        text << L" | game_enabled=" << game.enabled << L" | game_active=" << game.active << L" | game_pid=" << game.targetPid
+             << L" | game_api=" << GameOverlay::BackendName(game.backend) << L" | game_frames=" << game.frames
+             << L" | game_error=" << game.error << L" | game_render_error=" << game.renderError << L" | vulkan_error=" << game.layerError;
         SetWindowTextW(controller_, text.str().c_str());
     }
 
@@ -417,6 +424,7 @@ private:
         bool active;
         { std::lock_guard<std::mutex> lock(mutex_); suspended_ = suspended; ++generation_; active = pumpEnabled_ && !suspended_; }
         pump_.SetActive(active);
+        game_.SetVisible(visible_ && !suspended);
         condition_.notify_all();
     }
     void ConfigureRuntimeSettings() {
@@ -435,6 +443,7 @@ private:
     void SetVisible(bool visible) {
         if (visible_ == visible) return;
         visible_ = visible;
+        game_.SetVisible(visible);
         SetSampling(visible);
         if (visible) {
             if (!Render()) {
@@ -443,7 +452,8 @@ private:
                 Notify(L"悬浮窗显示失败", L"无法更新透明窗口，请退出后重新启动程序。");
                 return;
             }
-            SetWindowPos(overlay_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            if (positioning_ || !game_.Status().active)
+                SetWindowPos(overlay_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
         } else ShowWindow(overlay_, SW_HIDE);
         UpdateTooltip();
     }
@@ -476,11 +486,43 @@ private:
         auto bitmap = RenderOverlay(sample, scale, std::max(1L, work.right - work.left - 2 * margin),
             std::max(1L, work.bottom - work.top - 2 * margin), settings, positioning_);
         if (!bitmap) return false;
+        if (!positioning_) {
+            auto* image = bitmap.get();
+            std::unique_ptr<Gdiplus::Bitmap> limited;
+            float rasterScale = scale;
+            if (bitmap->GetWidth() > GameOverlay::MaxWidth || bitmap->GetHeight() > GameOverlay::MaxHeight) {
+                limited = RenderOverlay(sample, scale, static_cast<int>(GameOverlay::MaxWidth), static_cast<int>(GameOverlay::MaxHeight), settings);
+                if (limited) {
+                    rasterScale *= std::min(static_cast<float>(limited->GetWidth()) / bitmap->GetWidth(), static_cast<float>(limited->GetHeight()) / bitmap->GetHeight());
+                    image = limited.get();
+                }
+            }
+            nativePublished_ = game_.Publish(*image, settings, std::clamp(rasterScale, 0.25f, 8.0f));
+            if (!nativePublished_) game_.SetVisible(false);
+        }
         const int width = static_cast<int>(bitmap->GetWidth()), height = static_cast<int>(bitmap->GetHeight());
         const POINT position = OverlayPosition(settings, work, {width, height}, dpiX);
         // Moving first ensures WM_DPICHANGED is delivered; rendering always uses the selected monitor's DPI.
         SetWindowPos(overlay_, nullptr, position.x, position.y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER);
         return PresentOverlay(overlay_, *bitmap, position);
+    }
+
+    void UpdateGameOverlay() {
+        DWORD foreground = 0;
+        GetWindowThreadProcessId(GetForegroundWindow(), &foreground);
+        const auto frames = Latest().frameRate;
+        bool hasFrames = frames.processId == foreground && frames.fps.has_value() && settings_.visibleMetrics != 0;
+        const auto monitors = ListMonitors();
+        auto display = std::find_if(monitors.begin(), monitors.end(), [this](const auto& m) { return settings_.monitor == m.info.szDevice; });
+        if (display == monitors.end()) display = std::find_if(monitors.begin(), monitors.end(), [](const auto& m) { return (m.info.dwFlags & MONITORINFOF_PRIMARY) != 0; });
+        if (display != monitors.end() && MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTONEAREST) != display->handle) hasFrames = false;
+        game_.Tick(foreground, hasFrames && !positioning_, visible_ && !suspended_ && nativePublished_);
+        const bool gameVisible = !positioning_ && game_.Status().active;
+        if (visible_ && gameVisible && IsWindowVisible(overlay_)) ShowWindow(overlay_, SW_HIDE);
+        else if (visible_ && !gameVisible && !IsWindowVisible(overlay_)) {
+            Render();
+            SetWindowPos(overlay_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        }
     }
 
     void AddTray() {
@@ -538,6 +580,7 @@ private:
         }
         const bool runtimeChanged = settings_.pumpEnabled != candidate.pumpEnabled || settings_.refreshIntervalMs != candidate.refreshIntervalMs;
         shortcut_->Commit(); settings_ = candidate; preview_.reset(); StopPositioning();
+        game_.Configure(settings_.gameOverlayEnabled, settings_.gameOverlayBackends);
         if (runtimeChanged) ConfigureRuntimeSettings();
         if (visible_) Render(); UpdateTooltip();
         return true;
@@ -554,6 +597,7 @@ private:
         const bool wasVisible = visible_;
         SettingsCallbacks callbacks;
         callbacks.opened = [this](HWND window) { settingsWindow_ = window; };
+        callbacks.gameStatus = [this] { return game_.Status().Text(); };
         callbacks.apply = [this](const OverlaySettings& candidate, std::wstring& error) { return ApplySettings(candidate, error); };
         callbacks.preview = [this](const OverlaySettings& candidate) {
             StopPositioning(); preview_ = candidate; SetVisible(true); Render();
@@ -631,7 +675,7 @@ private:
             if (status != ERROR_SUCCESS) ShowError(L"无法修改开机自启设置。", status);
         } else if (selected == RetryHotkey) RegisterShortcut();
         else if (selected == About) {
-            const std::wstring help = L"CpuOverlay 1.11.0.0\n\n" + ShortcutText(settings_) +
+            const std::wstring help = L"CpuOverlay 1.12.0.0\n\n" + ShortcutText(settings_) +
                 L"：显示 / 隐藏；单击托盘图标也可切换。\n"
                 L"右键托盘 → 设置：快捷键、横/纵排列、自定义坐标及拖动定位。\n"
                 L"可调整字体、字号、粗细、颜色、不透明度、间距和描边。\n"
@@ -654,8 +698,9 @@ private:
                 L"乔思伯水冷数显屏：默认关闭，在设置中勾选并应用后发送 CPU 温度。\n"
                 L"启用数显后，隐藏悬浮窗仍每秒采温，不受信息刷新间隔影响。\n"
                 L"各核心频率可能不同，读数可能与任务管理器不同。\n"
-                L"游戏置顶每 500 毫秒检查遮挡并恢复，不抢焦点。\n"
-                L"支持窗口化/无边框全屏；独占全屏和安全桌面无法保证覆盖。\n\n"
+                L"内置游戏显示：D3D11 / D3D12 / OpenGL / Vulkan，支持 64 位游戏。\n"
+                L"Vulkan 游戏请在本程序之后启动；各游戏兼容性仍需实测。\n"
+                L"窗口化、无边框和独占全屏由游戏模块绘制；接入失败时保留桌面显示。\n\n"
                 L"硬件传感器需要已安装 PawnIO 及管理员权限。\n"
                 L"登录自启使用当前用户的最高权限计划任务；可在托盘中取消。\n"
                 L"删除程序前请先取消自启并退出。";
@@ -695,7 +740,7 @@ private:
         case kHide: app->SetVisible(false); return 0;
         case kMenu: app->ShowMenu(); return 0;
         case kSettings: app->OpenSettings(); return 0;
-        case kTopmost: MaintainOverlayTopmost(app->overlay_, app->positioning_ || app->dragging_); return 0;
+        case kTopmost: app->UpdateGameOverlay(); MaintainOverlayTopmost(app->overlay_, app->positioning_ || app->dragging_); return 0;
         case kSample:
             app->UpdatePumpStatusText();
             if (app->visible_) { app->Render(); app->UpdateTooltip(); }
@@ -705,7 +750,7 @@ private:
             else if (LOWORD(lParam) == NIN_SELECT || LOWORD(lParam) == NIN_KEYSELECT) app->SetVisible(!app->visible_);
             return 0;
         case WM_TIMER:
-            if (wParam == 2) MaintainOverlayTopmost(app->overlay_, app->positioning_ || app->dragging_);
+            if (wParam == 2) { app->UpdateGameOverlay(); MaintainOverlayTopmost(app->overlay_, app->positioning_ || app->dragging_); }
             else if (!app->trayAdded_) app->AddTray();
             return 0;
         case WM_DISPLAYCHANGE: case WM_SETTINGCHANGE:
@@ -756,6 +801,8 @@ private:
     unsigned long long generation_ = 0;
     CpuSample latest_;
     PumpDisplay pump_;
+    NativeGameOverlay game_;
+    bool nativePublished_ = false;
 };
 }
 

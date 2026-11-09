@@ -4,7 +4,7 @@
 #include <cwctype>
 
 namespace {
-constexpr wchar_t kValue[] = L"DisplaySettingsV7";
+constexpr wchar_t kValue[] = L"DisplaySettingsV8";
 constexpr unsigned kLegacyMetricCount = 15;
 constexpr unsigned kVersion6MetricCount = 17;
 struct SavedSettings {
@@ -25,6 +25,7 @@ struct SavedSettingsV7 {
     SavedSettingsV5 legacy;
     std::array<std::array<wchar_t, OverlayMetric::MaxLabelLength + 1>, OverlayMetric::Count> labels{};
 };
+struct SavedSettingsV8 { SavedSettingsV7 profile; DWORD gameEnabled = 1, gameBackends = 15; };
 DWORD Dword(const wchar_t* key, const wchar_t* name, DWORD fallback) {
     DWORD value = 0, bytes = sizeof(value);
     return RegGetValueW(HKEY_CURRENT_USER, key, name, RRF_RT_REG_DWORD, nullptr, &value, &bytes) == ERROR_SUCCESS ? value : fallback;
@@ -68,6 +69,8 @@ bool ValidateOverlaySettings(const OverlaySettings& s, std::wstring& error) {
         error = L"显示内容包含无效选项。";
     else if (s.refreshIntervalMs < 200 || s.refreshIntervalMs > 5000)
         error = L"信息刷新间隔需在 200–5000 毫秒之间。";
+    else if ((s.gameOverlayBackends & ~15u) || (s.gameOverlayEnabled && !s.gameOverlayBackends))
+        error = L"启用游戏内显示时，请至少选择一种图形接口。";
     else if ((s.hotkeyModifiers & ~(MOD_ALT | MOD_CONTROL | MOD_SHIFT | MOD_WIN)) || !s.hotkeyKey || s.hotkeyKey > 254 ||
         s.hotkeyKey == VK_F12 || s.hotkeyKey == VK_SHIFT || s.hotkeyKey == VK_CONTROL || s.hotkeyKey == VK_MENU ||
         s.hotkeyKey == VK_LWIN || s.hotkeyKey == VK_RWIN || s.hotkeyKey == VK_ESCAPE || s.hotkeyKey == VK_TAB ||
@@ -96,21 +99,23 @@ bool ValidateOverlaySettings(const OverlaySettings& s, std::wstring& error) {
 OverlaySettings LoadOverlaySettings(const wchar_t* key) {
     // Keep V1-V6 intact for rollback. Enable added metrics on a V2 upgrade,
     // except when the user deliberately hid every metric.
-    for (DWORD version : {7u, 6u, 5u, 4u, 3u, 2u, 1u}) {
+    for (DWORD version : {8u, 7u, 6u, 5u, 4u, 3u, 2u, 1u}) {
+        SavedSettingsV8 version8{};
         SavedSettingsV7 current{};
         SavedSettingsV6 version6{};
         SavedSettingsV5 stored{};
         auto& saved = stored.profile.profile.base;
-        const DWORD expected = version == 7 ? sizeof(current) : version == 6 ? sizeof(version6) :
+        const DWORD expected = version == 8 ? sizeof(version8) : version == 7 ? sizeof(current) : version == 6 ? sizeof(version6) :
             version == 5 ? sizeof(stored) : version == 4 ? sizeof(stored.profile) :
             version >= 2 ? sizeof(stored.profile.profile) : sizeof(saved);
         DWORD bytes = expected;
-        const auto name = version == 7 ? kValue : version == 6 ? L"DisplaySettingsV6" : version == 5 ? L"DisplaySettingsV5" : version == 4 ? L"DisplaySettingsV4" : version == 3 ? L"DisplaySettingsV3" :
+        const auto name = version == 8 ? kValue : version == 7 ? L"DisplaySettingsV7" : version == 6 ? L"DisplaySettingsV6" : version == 5 ? L"DisplaySettingsV5" : version == 4 ? L"DisplaySettingsV4" : version == 3 ? L"DisplaySettingsV3" :
             version == 2 ? L"DisplaySettingsV2" : L"DisplaySettingsV1";
-        void* data = version == 7 ? static_cast<void*>(&current) :
+        void* data = version == 8 ? static_cast<void*>(&version8) : version == 7 ? static_cast<void*>(&current) :
             version == 6 ? static_cast<void*>(&version6) : static_cast<void*>(&stored);
         if (RegGetValueW(HKEY_CURRENT_USER, key, name, RRF_RT_REG_BINARY, nullptr, data, &bytes) != ERROR_SUCCESS || bytes != expected) continue;
-        if (version == 7) stored = current.legacy;
+        if (version == 8) { current = version8.profile; stored = current.legacy; }
+        else if (version == 7) stored = current.legacy;
         else if (version == 6) stored = version6.legacy;
         if (saved.version != version || saved.bytes != expected) continue;
         if (std::find(std::begin(saved.font), std::end(saved.font), L'\0') == std::end(saved.font) ||
@@ -157,7 +162,7 @@ OverlaySettings LoadOverlaySettings(const wchar_t* key) {
             if (s.visibleMetrics & ~0xffu) continue;
             if (s.visibleMetrics) s.visibleMetrics |= OverlayMetric::AddedMetrics;
         }
-        if (version == 7) {
+        if (version >= 7) {
             bool valid = true;
             for (unsigned i = 0; i < OverlayMetric::Count; ++i) {
                 const auto& label = current.labels[i];
@@ -165,6 +170,10 @@ OverlaySettings LoadOverlaySettings(const wchar_t* key) {
                 s.metricLabels[i] = label.data();
             }
             if (!valid) continue;
+        }
+        if (version == 8) {
+            if (version8.gameEnabled > 1) continue;
+            s.gameOverlayEnabled = version8.gameEnabled != 0; s.gameOverlayBackends = version8.gameBackends;
         }
         s.font = saved.font; s.monitor = saved.monitor;
         std::wstring error;
@@ -183,10 +192,12 @@ OverlaySettings LoadOverlaySettings(const wchar_t* key) {
 LSTATUS SaveOverlaySettings(const OverlaySettings& s, const wchar_t* key) {
     std::wstring error;
     if (!ValidateOverlaySettings(s, error)) return ERROR_INVALID_DATA;
-    SavedSettingsV7 current{};
+    SavedSettingsV8 version8{};
+    auto& current = version8.profile;
     auto& stored = current.legacy;
     auto& saved = stored.profile.profile.base;
-    saved.version = 7; saved.bytes = sizeof(current);
+    saved.version = 8; saved.bytes = sizeof(version8);
+    version8.gameEnabled = s.gameOverlayEnabled ? 1 : 0; version8.gameBackends = s.gameOverlayBackends;
     stored.profile.profile.visibleMetrics = s.visibleMetrics;
     stored.profile.order = s.metricOrder;
     for (unsigned i = 0; i < OverlayMetric::Count; ++i)
@@ -205,7 +216,7 @@ LSTATUS SaveOverlaySettings(const OverlaySettings& s, const wchar_t* key) {
     LSTATUS result = RegCreateKeyExW(HKEY_CURRENT_USER, key, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &opened, nullptr);
     if (result != ERROR_SUCCESS) return result;
     // One value prevents an interrupted save from leaving a partially applied profile.
-    result = RegSetValueExW(opened, kValue, 0, REG_BINARY, reinterpret_cast<const BYTE*>(&current), sizeof(current));
+    result = RegSetValueExW(opened, kValue, 0, REG_BINARY, reinterpret_cast<const BYTE*>(&version8), sizeof(version8));
     RegCloseKey(opened);
     return result;
 }

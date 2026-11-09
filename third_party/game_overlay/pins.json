@@ -1,0 +1,17 @@
+{
+  "TsudaKageyu/minhook": {
+    "tag": "v1.3.4",
+    "url": "https://codeload.github.com/TsudaKageyu/minhook/zip/refs/tags/v1.3.4",
+    "sha256": "172708123daa0c98d20d3a980b16a50be14af243dc95dee6f79c24193ad010e4"
+  },
+  "KhronosGroup/Vulkan-Headers": {
+    "tag": "v1.3.296",
+    "url": "https://codeload.github.com/KhronosGroup/Vulkan-Headers/zip/refs/tags/v1.3.296",
+    "sha256": "45a8c99f867a686b85bbb6fa460dad41840ecfa1ca111a29f044387f47308dce"
+  },
+  "ocornut/imgui": {
+    "tag": "v1.91.9b",
+    "url": "https://codeload.github.com/ocornut/imgui/zip/refs/tags/v1.91.9b",
+    "sha256": "fd37507c8476a6d14cc7c4b352401f31bcbd0f0d995d35390811e968c466f46e"
+  }
+}

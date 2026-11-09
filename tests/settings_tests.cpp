@@ -100,6 +100,11 @@ void CALLBACK NamesUiTimer(HWND window, UINT, UINT_PTR timer, DWORD) {
         SendMessageW(editor, WM_COMMAND, test.action == 1 ? IDCANCEL : IDOK, 0);
         return;
     }
+    if (!test.capture.empty()) {
+        ShowWindow(window, SW_SHOWNOACTIVATE);
+        RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+        CaptureTestWindow(window, test.capture.parent_path() / L"native-settings.png");
+    }
     SendMessageW(window, WM_COMMAND, IDC_DESKTOP_PREVIEW, 0);
     if (!test.cancelMain) SendMessageW(window, WM_COMMAND, IDC_APPLY, 0);
     test.complete = true;
@@ -116,6 +121,8 @@ void TestNamesDialog(int action, bool cancelMain, const std::filesystem::path& c
     SettingsCallbacks callbacks;
     callbacks.opened = [&test](HWND window) {
         test.owner = window;
+        Check(IsDlgButtonChecked(window, IDC_GAME_ENABLED) == BST_CHECKED, "native display control reflects default configuration");
+        for (unsigned i = 0; i < 4; ++i) Check(IsDlgButtonChecked(window, IDC_GAME_D3D11 + i) == BST_CHECKED, "all four backend controls initialize");
         SetPropW(window, L"CpuOverlay.NamesTest", reinterpret_cast<HANDLE>(&test));
         SetTimer(window, 42, 20, NamesUiTimer);
         PostMessageW(window, WM_COMMAND, IDC_EDIT_NAMES, 0);
@@ -196,6 +203,12 @@ int wmain(int argc, wchar_t** argv) {
         Check(!ValidateOverlaySettings(s, error), "non-RGB color rejected");
         s = {}; s.opacity = 9;
         Check(!ValidateOverlaySettings(s, error), "invisible overlay opacity rejected");
+        s = {}; s.gameOverlayBackends = 16;
+        Check(!ValidateOverlaySettings(s, error), "unknown native backend rejected");
+        s = {}; s.gameOverlayBackends = 0;
+        Check(!ValidateOverlaySettings(s, error), "enabled native rendering needs a backend");
+        s.gameOverlayEnabled = false;
+        Check(ValidateOverlaySettings(s, error), "all native backends may be disabled");
 
         s = {};
         auto p = OverlayPosition(s, {-1920, 0, 0, 1040}, {800, 44}, 96);
@@ -215,6 +228,7 @@ int wmain(int argc, wchar_t** argv) {
         s.color = RGB(25, 130, 220); s.outlineColor = RGB(233, 244, 255); s.outlineWidth = 4;
         s.gap = 12; s.opacity = 70; s.margin = 22;
         s.valueGap = 17; s.pumpEnabled = true; s.refreshIntervalMs = 750;
+        s.gameOverlayEnabled = false; s.gameOverlayBackends = 9;
         s.hotkeyModifiers = MOD_CONTROL | MOD_SHIFT; s.hotkeyKey = VK_F9; s.monitor = L"\\\\.\\DISPLAY2";
         s.visibleMetrics = OverlayMetric::Temperature | OverlayMetric::Keyboard | OverlayMetric::Mouse;
         s.metricLabels[0] = std::wstring(32, L'C'); s.metricLabels[2] = L"核心温度"; s.metricLabels[7] = L"Mouse Battery";
@@ -224,6 +238,7 @@ int wmain(int argc, wchar_t** argv) {
         Check(loaded.visibleMetrics == s.visibleMetrics, "selected metrics survive reload");
         Check(loaded.metricOrder == s.metricOrder, "custom display order survives reload");
         Check(loaded.metricLabels == s.metricLabels, "per-metric Chinese and English keys survive reload");
+        Check(!loaded.gameOverlayEnabled && loaded.gameOverlayBackends == 9, "native backend selection survives atomic save/reload");
         Check(loaded.valueGap == 17 && loaded.pumpEnabled && loaded.refreshIntervalMs == 750,
             "label/value spacing, optional pump and refresh interval survive reload");
         Check(loaded.font == s.font && loaded.fontPoints == 33 && !loaded.bold && loaded.italic && loaded.color == s.color &&
@@ -235,7 +250,7 @@ int wmain(int argc, wchar_t** argv) {
         HKEY testKey = nullptr;
         RegOpenKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, KEY_SET_VALUE | KEY_QUERY_VALUE, &testKey);
         DWORD size = 0;
-        RegQueryValueExW(testKey, L"DisplaySettingsV7", nullptr, nullptr, nullptr, &size);
+        RegQueryValueExW(testKey, L"DisplaySettingsV8", nullptr, nullptr, nullptr, &size);
         // Frozen fixture offsets describe the historical on-disk formats.
         constexpr DWORD v1Bytes = 196, v5Bytes = 272, v6Bytes = 340, visibleOffset = 196, orderOffset = 200;
         if (size <= v6Bytes) {
@@ -244,8 +259,8 @@ int wmain(int argc, wchar_t** argv) {
             return 1;
         }
         std::vector<BYTE> profile(size);
-        RegQueryValueExW(testKey, L"DisplaySettingsV7", nullptr, nullptr, profile.data(), &size);
-        const auto savedProfileV7 = profile;
+        RegQueryValueExW(testKey, L"DisplaySettingsV8", nullptr, nullptr, profile.data(), &size);
+        const auto savedProfileV8 = profile;
         auto write = [testKey](const wchar_t* name, const std::vector<BYTE>& bytes) {
             return RegSetValueExW(testKey, name, 0, REG_BINARY, bytes.data(), static_cast<DWORD>(bytes.size()));
         };
@@ -257,6 +272,12 @@ int wmain(int argc, wchar_t** argv) {
             std::memcpy(bytes.data() + visibleOffset, &value, sizeof(value));
         };
         const std::vector<BYTE> savedLegacyPrefix(profile.begin(), profile.begin() + v5Bytes);
+        auto version7 = savedProfileV8; version7.resize(version7.size() - 2 * sizeof(DWORD)); header(version7, 7);
+        write(L"DisplaySettingsV7", version7); RegDeleteValueW(testKey, L"DisplaySettingsV8");
+        const auto migratedV7 = LoadOverlaySettings(key.c_str());
+        Check(migratedV7.metricLabels == loaded.metricLabels && migratedV7.fontPoints == 33 &&
+            migratedV7.gameOverlayEnabled && migratedV7.gameOverlayBackends == 15, "V7 preserves labels and enables the four built-in backends");
+        RegDeleteValueW(testKey, L"DisplaySettingsV7");
         auto oldProfile = savedLegacyPrefix;
         oldProfile.resize(v6Bytes); header(oldProfile, 6);
         std::vector<DWORD> expandedOrder{16};
@@ -264,7 +285,7 @@ int wmain(int argc, wchar_t** argv) {
         expandedOrder.insert(expandedOrder.begin() + 5, 15);
         std::memcpy(oldProfile.data() + v5Bytes, expandedOrder.data(), 17 * sizeof(DWORD));
         visible(oldProfile, loaded.visibleMetrics | (3u << 15));
-        write(L"DisplaySettingsV6", oldProfile); RegDeleteValueW(testKey, L"DisplaySettingsV7");
+        write(L"DisplaySettingsV6", oldProfile); RegDeleteValueW(testKey, L"DisplaySettingsV8");
         const auto migratedV6 = LoadOverlaySettings(key.c_str());
         Check(migratedV6.metricOrder == loaded.metricOrder && migratedV6.visibleMetrics == loaded.visibleMetrics &&
             migratedV6.metricLabels == OverlayMetric::DefaultLabels(), "V6 removes retired interleaved metrics and restores default hardware labels");
@@ -307,33 +328,33 @@ int wmain(int argc, wchar_t** argv) {
             migrated.visibleMetrics == OverlayMetric::All, "V1 preserves appearance and defaults hardware metrics on");
         s = migrated; s.visibleMetrics = OverlayMetric::Mouse; s.metricLabels[7] = L"鼠标电量";
         Check(SaveOverlaySettings(s, key.c_str()) == ERROR_SUCCESS && LoadOverlaySettings(key.c_str()).visibleMetrics == OverlayMetric::Mouse &&
-            LoadOverlaySettings(key.c_str()).metricLabels == s.metricLabels, "V7 names and selections override retained legacy profiles");
+            LoadOverlaySettings(key.c_str()).metricLabels == s.metricLabels, "V8 names and selections override retained legacy profiles");
         s.metricLabels[7].clear();
         Check(SaveOverlaySettings(s, key.c_str()) == ERROR_INVALID_DATA &&
             LoadOverlaySettings(key.c_str()).metricLabels[7] == L"鼠标电量", "invalid label saves preserve the last valid configuration");
         const DWORD duplicate = 13;
-        auto corruptProfile = savedProfileV7;
+        auto corruptProfile = savedProfileV8;
         std::memcpy(corruptProfile.data() + orderOffset + sizeof(DWORD), &duplicate, sizeof(duplicate));
-        write(L"DisplaySettingsV7", corruptProfile);
-        Check(LoadOverlaySettings(key.c_str()).metricOrder == OverlayMetric::DefaultOrder(), "corrupt V7 order falls back safely");
-        corruptProfile = savedProfileV7;
+        write(L"DisplaySettingsV8", corruptProfile);
+        Check(LoadOverlaySettings(key.c_str()).metricOrder == OverlayMetric::DefaultOrder(), "corrupt V8 order falls back safely");
+        corruptProfile = savedProfileV8;
         const DWORD invalidPump = 2;
         std::memcpy(corruptProfile.data() + v5Bytes - 2 * sizeof(DWORD), &invalidPump, sizeof(invalidPump));
-        write(L"DisplaySettingsV7", corruptProfile);
+        write(L"DisplaySettingsV8", corruptProfile);
         Check(!LoadOverlaySettings(key.c_str()).pumpEnabled, "invalid pump flag never enables hardware access");
-        corruptProfile = savedProfileV7;
+        corruptProfile = savedProfileV8;
         std::array<wchar_t, 33> unterminated; unterminated.fill(L'A');
         std::memcpy(corruptProfile.data() + v5Bytes, unterminated.data(), sizeof(unterminated));
-        write(L"DisplaySettingsV7", corruptProfile);
+        write(L"DisplaySettingsV8", corruptProfile);
         Check(LoadOverlaySettings(key.c_str()).metricLabels == OverlayMetric::DefaultLabels(), "unterminated labels safely fall back");
-        corruptProfile = savedProfileV7;
+        corruptProfile = savedProfileV8;
         const wchar_t newline = L'\n';
         std::memcpy(corruptProfile.data() + v5Bytes, &newline, sizeof(newline));
-        write(L"DisplaySettingsV7", corruptProfile);
+        write(L"DisplaySettingsV8", corruptProfile);
         Check(LoadOverlaySettings(key.c_str()).metricLabels == OverlayMetric::DefaultLabels(), "persisted control characters are rejected");
         const DWORD junk = 0xffffffff;
-        RegSetValueExW(testKey, L"DisplaySettingsV7", 0, REG_BINARY, reinterpret_cast<const BYTE*>(&junk), sizeof(junk));
-        Check(LoadOverlaySettings(key.c_str()).fontPoints == 33 && LoadOverlaySettings(key.c_str()).visibleMetrics == OverlayMetric::All, "damaged V7 uses intact legacy profile");
+        RegSetValueExW(testKey, L"DisplaySettingsV8", 0, REG_BINARY, reinterpret_cast<const BYTE*>(&junk), sizeof(junk));
+        Check(LoadOverlaySettings(key.c_str()).fontPoints == 33 && LoadOverlaySettings(key.c_str()).visibleMetrics == OverlayMetric::All, "damaged V8 uses intact legacy profile");
         RegDeleteValueW(testKey, L"DisplaySettingsV1"); RegCloseKey(testKey);
         Check(LoadOverlaySettings(key.c_str()).fontPoints == 18, "corrupt settings safely fall back");
         RegDeleteTreeW(HKEY_CURRENT_USER, key.c_str());

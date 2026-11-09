@@ -16,8 +16,8 @@ $fields = @{
     CompanyName = 'sixunited'
     ProductName = 'CpuOverlay'
     FileDescription = 'System Performance, Battery and Cooling Display Monitor'
-    FileVersion = '1.11.0.0'
-    ProductVersion = '1.11.0.0'
+    FileVersion = '1.12.0.0'
+    ProductVersion = '1.12.0.0'
     OriginalFilename = 'CpuOverlay.exe'
     InternalName = 'CpuOverlay'
     LegalCopyright = 'Copyright (c) 2026 sixunited. Author: sclliang'
@@ -243,6 +243,28 @@ Assert-Condition ($LASTEXITCODE -eq 0) 'Installer dumpbin failed.'
 $setupDlls = @($setupImports | ForEach-Object { if ($_ -match '^\s+([A-Za-z0-9_.-]+\.dll)\s*$') { $Matches[1] } })
 foreach ($dll in $setupDlls) { Assert-Condition ($dll -in $systemDlls) "Unexpected installer dependency: $dll" }
 
+$nativeDirectory = Join-Path (Split-Path $exePath) 'bin\game'
+$nativeDll = Join-Path $nativeDirectory 'CpuOverlayGame64.dll'
+$nativeVersion = (Get-Item -LiteralPath $nativeDll).VersionInfo
+foreach ($field in @('CompanyName','ProductName','FileVersion','ProductVersion','LegalCopyright')) {
+    Assert-Condition ($nativeVersion.$field -eq $fields[$field]) "Incorrect native module VERSIONINFO: $field"
+}
+Assert-Condition ($nativeVersion.OriginalFilename -eq 'CpuOverlayGame64.dll') 'Native module original filename mismatch.'
+Assert-Condition ([InstallerPayload]::Author($nativeDll) -eq 'sclliang') 'Native module author metadata mismatch.'
+Assert-Condition ([InstallerPayload]::LanguageId($nativeDll) -eq 0x0409) 'Native module resource language mismatch.'
+foreach ($payload in @(
+    @{Name='CpuOverlayGame64.dll';Id=122}, @{Name='CpuOverlayGame64.json';Id=123},
+    @{Name='LICENSE-MinHook.txt';Id=124}, @{Name='LICENSE-imgui.txt';Id=125}, @{Name='LICENSE-Vulkan-Headers.txt';Id=126})) {
+    Assert-Condition ([InstallerPayload]::Hash($setupPath, $payload.Id) -eq (Get-FileHash -LiteralPath (Join-Path $nativeDirectory $payload.Name)).Hash) 'Native overlay installer payload mismatch.'
+}
+$nativeImports = & $dumpbin /dependents $nativeDll
+Assert-Condition ($LASTEXITCODE -eq 0) 'Native module dumpbin failed.'
+$nativeDlls = @($nativeImports | ForEach-Object { if ($_ -match '^\s+([A-Za-z0-9_.-]+\.dll)\s*$') { $Matches[1] } })
+$nativeSystemDlls = $systemDlls + @('d3d11.dll','d3d12.dll','D3DCOMPILER_47.dll','OPENGL32.dll')
+foreach ($dll in $nativeDlls) { Assert-Condition ($dll -in $nativeSystemDlls) "Unexpected native runtime dependency: $dll" }
+$nativeExports = & $dumpbin /exports $nativeDll
+Assert-Condition (($nativeExports -join "`n") -match 'CpuOverlayStart' -and ($nativeExports -join "`n") -match 'vkNegotiateLoaderLayerInterfaceVersion') 'Missing native loader exports.'
+
 $report = [ordered]@{
     version = $version.FileVersion
     version_info = 'PASS'
@@ -261,6 +283,8 @@ $report = [ordered]@{
     embedded_main_and_official_pawnio_installer = 'PASS'
     installer_dll_dependencies = $setupDlls
     gpu_bridge_and_presentmon_payload = 'PASS'
+    native_overlay_payload_and_metadata = 'PASS'
+    native_overlay_dependencies = $nativeDlls
 }
 $report | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $artifactPath 'release-report.json') -Encoding UTF8
 $report | ConvertTo-Json -Depth 4

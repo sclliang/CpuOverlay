@@ -1,4 +1,5 @@
 #include <windows.h>
+#include "../src/game_overlay_registration.h"
 #include <commctrl.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -178,11 +179,23 @@ void Report(const Options& options, const Outcome& outcome) {
         << ",\n  \"error\": \"" << Json(outcome.error) << "\"\n}\n";
 }
 
+void CheckGameModuleWritable(const fs::path& target) {
+    const auto module = target / L"bin" / L"game" / L"CpuOverlayGame64.dll";
+    HANDLE file = CreateFileW(module.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        const auto error = GetLastError();
+        Require(error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND,
+            L"无法更新内置游戏显示模块，请关闭正在使用 CpuOverlay 的游戏后重试。\n" + ErrorText(error));
+    } else CloseHandle(file);
+}
 void Uninstall(const Options& options) {
     const auto installed = ReadRegistry(HKEY_CURRENT_USER, kUninstallKey, L"InstallLocation");
     Require(!installed.empty() && _wcsicmp(fs::weakly_canonical(installed).c_str(), fs::weakly_canonical(options.target).c_str()) == 0,
         L"卸载路径与已登记的安装位置不一致，已停止操作。");
     StopOverlay();
+    CheckGameModuleWritable(options.target);
+    ConfigureGameOverlayLayer(options.target / L"bin" / L"game" / L"CpuOverlayGame64.json", false);
     const auto main = options.target / L"CpuOverlay.exe";
     if (fs::exists(main)) { Require(IsCpuOverlay(main), L"目标文件不属于 CpuOverlay。"); Require(Run(main, L"--disable-startup") == 0, L"移除登录自启失败。"); }
     const wchar_t* files[] = {L"CpuOverlay.exe", L"bin\\pawnio\\IntelMSR.bin", L"bin\\pawnio\\IntelMSR.p", L"bin\\pawnio\\COPYING",
@@ -192,7 +205,9 @@ void Uninstall(const Options& options) {
         L"bin\\pawnio\\README.md", L"bin\\docs\\README.md", L"bin\\install-report.json",
         L"bin\\gpu\\LhmCpuSensorBridge.dll", L"bin\\gpu\\LICENSE-MPL-2.0", L"bin\\gpu\\LICENSE-PawnIO-Modules-LGPL-2.1",
         L"bin\\gpu\\README.md", L"bin\\presentmon\\LICENSE.txt", L"bin\\presentmon\\README.md",
-        L"bin\\voltide\\LICENSE.txt", L"bin\\voltide\\README.md"};
+        L"bin\\voltide\\LICENSE.txt", L"bin\\voltide\\README.md",
+        L"bin\\game\\CpuOverlayGame64.dll", L"bin\\game\\CpuOverlayGame64.json", L"bin\\game\\LICENSE-MinHook.txt",
+        L"bin\\game\\LICENSE-imgui.txt", L"bin\\game\\LICENSE-Vulkan-Headers.txt"};
     for (const auto relative : files) {
         const auto path = options.target / relative;
         Require(DeleteFileW(path.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND, L"无法删除程序文件：" + path.wstring());
@@ -211,6 +226,7 @@ void Uninstall(const Options& options) {
     RemoveDirectoryW((options.target / L"bin" / L"gpu").c_str());
     RemoveDirectoryW((options.target / L"bin" / L"presentmon").c_str());
     RemoveDirectoryW((options.target / L"bin" / L"voltide").c_str());
+    RemoveDirectoryW((options.target / L"bin" / L"game").c_str());
     // PawnIO is a shared system component. Uninstalling this app never removes its driver.
 }
 
@@ -241,6 +257,7 @@ Outcome Perform(const Options& options, HWND progress) {
         const auto main = options.target / L"CpuOverlay.exe";
         if (fs::exists(main)) Require(IsCpuOverlay(main), L"目标位置存在同名的其他程序，无法覆盖。");
         StopOverlay();
+        CheckGameModuleWritable(options.target);
         fs::create_directories(options.target / L"bin" / L"backup");
         if (fs::exists(main))
             Require(CopyFileW(main.c_str(), (options.target / L"bin" / L"backup" / L"CpuOverlay-previous.exe").c_str(), FALSE) != FALSE, L"无法备份原程序。");
@@ -264,6 +281,11 @@ Outcome Perform(const Options& options, HWND progress) {
         Extract(119, options.target / L"bin" / L"presentmon" / L"README.md");
         Extract(120, options.target / L"bin" / L"voltide" / L"LICENSE.txt");
         Extract(121, options.target / L"bin" / L"voltide" / L"README.md");
+        Extract(122, options.target / L"bin" / L"game" / L"CpuOverlayGame64.dll");
+        Extract(123, options.target / L"bin" / L"game" / L"CpuOverlayGame64.json");
+        Extract(124, options.target / L"bin" / L"game" / L"LICENSE-MinHook.txt");
+        Extract(125, options.target / L"bin" / L"game" / L"LICENSE-imgui.txt");
+        Extract(126, options.target / L"bin" / L"game" / L"LICENSE-Vulkan-Headers.txt");
         const auto uninstall = options.target / L"bin" / L"CpuOverlay-Setup.exe";
         if (_wcsicmp(SelfPath().c_str(), uninstall.c_str()) != 0)
             Require(CopyFileW(SelfPath().c_str(), uninstall.c_str(), FALSE) != FALSE, L"无法创建卸载程序。");

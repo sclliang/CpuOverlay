@@ -9,6 +9,7 @@
 #include <cmath>
 
 namespace {
+constexpr UINT_PTR kGameStatusTimer = 0x474f;
 struct Dialog {
     OverlaySettings current;
     SettingsCallbacks callbacks;
@@ -201,6 +202,8 @@ void Fill(HWND window, Dialog& d) {
     SendDlgItemMessageW(window, IDC_HOTKEY, HKM_SETHOTKEY, MAKEWORD(s.hotkeyKey, modifiers), 0);
     CheckDlgButton(window, IDC_WINKEY, s.hotkeyModifiers & MOD_WIN ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(window, IDC_PUMP_ENABLED, s.pumpEnabled ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(window, IDC_GAME_ENABLED, s.gameOverlayEnabled ? BST_CHECKED : BST_UNCHECKED);
+    for (unsigned i = 0; i < 4; ++i) CheckDlgButton(window, IDC_GAME_D3D11 + i, s.gameOverlayBackends & (1u << i) ? BST_CHECKED : BST_UNCHECKED);
     for (unsigned i = 0; i < OverlayMetric::Count; ++i)
         CheckDlgButton(window, IDC_METRIC_CPU + i, s.visibleMetrics & (1u << i) ? BST_CHECKED : BST_UNCHECKED);
     SendDlgItemMessageW(window, IDC_LAYOUT, CB_SETCURSEL, s.vertical, 0);
@@ -225,6 +228,9 @@ void Fill(HWND window, Dialog& d) {
 bool Read(HWND window, Dialog& d, OverlaySettings& s, bool report) {
     s = d.current;
     s.pumpEnabled = IsDlgButtonChecked(window, IDC_PUMP_ENABLED) == BST_CHECKED;
+    s.gameOverlayEnabled = IsDlgButtonChecked(window, IDC_GAME_ENABLED) == BST_CHECKED;
+    s.gameOverlayBackends = 0;
+    for (unsigned i = 0; i < 4; ++i) if (IsDlgButtonChecked(window, IDC_GAME_D3D11 + i) == BST_CHECKED) s.gameOverlayBackends |= 1u << i;
     auto fail = [window, report](const std::wstring& text) {
         if (report) MessageBoxW(window, text.c_str(), L"请检查设置", MB_OK | MB_ICONWARNING);
         return false;
@@ -308,10 +314,15 @@ INT_PTR CALLBACK Procedure(HWND window, UINT message, WPARAM wParam, LPARAM lPar
         SetWindowPos(window, nullptr, monitor.rcWork.left + std::max(0L, (monitor.rcWork.right - monitor.rcWork.left - (rect.right - rect.left)) / 2),
             monitor.rcWork.top + std::max(0L, (monitor.rcWork.bottom - monitor.rcWork.top - (rect.bottom - rect.top)) / 2), 0, 0, SWP_NOSIZE | SWP_NOZORDER);
         if (d->callbacks.opened) d->callbacks.opened(window);
+        if (d->callbacks.gameStatus) SetDlgItemTextW(window, IDC_GAME_STATUS, d->callbacks.gameStatus().c_str());
+        if (d->callbacks.gameStatus) SetTimer(window, kGameStatusTimer, 1000, nullptr);
         return TRUE;
     }
     if (!d) return FALSE;
     switch (message) {
+    case WM_TIMER:
+        if (wParam == kGameStatusTimer && d->callbacks.gameStatus) SetDlgItemTextW(window, IDC_GAME_STATUS, d->callbacks.gameStatus().c_str());
+        return TRUE;
     case WM_CTLCOLORDLG: return reinterpret_cast<INT_PTR>(d->background);
     case WM_CTLCOLORSTATIC:
         SetTextColor(reinterpret_cast<HDC>(wParam), RGB(30, 41, 59));

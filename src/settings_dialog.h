@@ -8,6 +8,7 @@ struct SettingsCallbacks {
     std::function<bool(const OverlaySettings&, std::wstring&)> apply;
     std::function<void(const OverlaySettings&)> preview;
     std::function<void(HWND, const OverlaySettings&)> pickPosition;
+    std::function<std::wstring()> gameStatus;
 };
 void ShowSettingsDialog(HWND owner, HINSTANCE instance, const OverlaySettings& settings, const SettingsCallbacks& callbacks);
 bool CaptureRegisteredShortcut(HWND dialog, const OverlaySettings& settings);

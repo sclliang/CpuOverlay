@@ -38,6 +38,8 @@ struct OverlaySettings {
     int outlineWidth = 2, opacity = 100, gap = 8;
     int valueGap = 0; // Extra logical pixels between the label (including ':') and its value.
     bool pumpEnabled = false;
+    bool gameOverlayEnabled = true;
+    DWORD gameOverlayBackends = 15; // D3D11, D3D12, OpenGL, Vulkan.
     int refreshIntervalMs = 1000;
     UINT hotkeyModifiers = MOD_ALT, hotkeyKey = VK_F1;
     DWORD visibleMetrics = OverlayMetric::All;
