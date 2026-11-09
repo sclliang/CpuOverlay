@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
-project(CpuOverlay VERSION 1.12.0.0 LANGUAGES C CXX RC)
+project(CpuOverlay VERSION 1.12.2.0 LANGUAGES C CXX RC)
+configure_file(src/app_version.h.in "${CMAKE_CURRENT_BINARY_DIR}/generated/app_version.h" @ONLY)
+include_directories("${CMAKE_CURRENT_BINARY_DIR}/generated")
 
 if(NOT WIN32 OR NOT MSVC)
   message(FATAL_ERROR "Build CpuOverlay with MSVC on Windows.")
@@ -28,7 +30,7 @@ target_compile_options(CpuOverlayGame PRIVATE /W4 /permissive- /utf-8 /EHsc)
 set_property(TARGET CpuOverlayGame PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 target_link_libraries(CpuOverlayGame PRIVATE CpuOverlayHookLibrary d3d11 d3d12 dxgi d3dcompiler opengl32 user32 gdi32)
 target_link_options(CpuOverlayGame PRIVATE /EXPORT:vkNegotiateLoaderLayerInterfaceVersion)
-set_target_properties(CpuOverlayGame PROPERTIES OUTPUT_NAME "CpuOverlayGame64"
+set_target_properties(CpuOverlayGame PROPERTIES OUTPUT_NAME "CpuOverlayGame64-${PROJECT_VERSION}"
   RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_SOURCE_DIR}/package/bin/game"
   RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_SOURCE_DIR}/package/bin/game")
 file(SHA256 "${CMAKE_SOURCE_DIR}/third_party/librehardwaremonitor/LhmCpuSensorBridge.dll" GPU_BRIDGE_SHA256)
@@ -188,11 +190,15 @@ target_compile_definitions(CpuOverlayGameProbe PRIVATE UNICODE _UNICODE NOMINMAX
   _WIN32_WINNT=0x0A00 VK_NO_PROTOTYPES VK_USE_PLATFORM_WIN32_KHR)
 target_compile_options(CpuOverlayGameProbe PRIVATE /W4 /permissive- /utf-8 /EHsc)
 set_property(TARGET CpuOverlayGameProbe PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-target_link_libraries(CpuOverlayGameProbe PRIVATE user32 gdi32 gdiplus advapi32 d3d11 d3d12 dxgi opengl32)
+target_link_libraries(CpuOverlayGameProbe PRIVATE user32 gdi32 gdiplus advapi32 d3d11 d3d12 dxgi opengl32 version)
 add_dependencies(CpuOverlayGameProbe CpuOverlayGame CpuOverlayGameFiles)
+add_test(NAME CpuOverlayGameRoutingTests COMMAND CpuOverlayGameProbe Routing "$<TARGET_FILE:CpuOverlayGame>")
+set_tests_properties(CpuOverlayGameRoutingTests PROPERTIES TIMEOUT 15)
 add_custom_command(TARGET CpuOverlayGameProbe POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:CpuOverlayGameProbe>/bin/game"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:CpuOverlayGame>" "$<TARGET_FILE_DIR:CpuOverlayGameProbe>/bin/game/CpuOverlayGame64.dll")
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:CpuOverlayGame>" "$<TARGET_FILE_DIR:CpuOverlayGameProbe>/bin/game/$<TARGET_FILE_NAME:CpuOverlayGame>")
+add_test(NAME CpuOverlayDeploymentTests COMMAND CpuOverlayGameProbe Deployment "$<TARGET_FILE:CpuOverlayGame>")
+set_tests_properties(CpuOverlayDeploymentTests PROPERTIES TIMEOUT 15)
 
 configure_file(installer/payload.rc.in "${CMAKE_BINARY_DIR}/payload.rc.in" @ONLY)
 file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/payload-$<CONFIG>.rc" INPUT "${CMAKE_BINARY_DIR}/payload.rc.in")

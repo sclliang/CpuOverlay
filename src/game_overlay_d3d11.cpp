@@ -147,6 +147,7 @@ bool DrawD3D11(void* pointer) {
     ComPtr<ID3D11RenderTargetView> target;
     if (FAILED(hr = device->CreateRenderTargetView(buffer.Get(), nullptr, &target))) { ReportError(D3D11, hr); return false; }
     DXGI_SWAP_CHAIN_DESC sc{}; chain->GetDesc(&sc);
+    if (!BeginDraw(*f, D3D11)) return true;
     const auto rect = WindowPlacement(*f, sc.OutputWindow, desc.Width, desc.Height);
     SavedState saved(r->context.Get());
     if (FAILED(hr = r->Upload(*f))) { ReportError(D3D11, hr); return false; }

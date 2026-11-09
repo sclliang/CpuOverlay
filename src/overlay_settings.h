@@ -40,6 +40,7 @@ struct OverlaySettings {
     bool pumpEnabled = false;
     bool gameOverlayEnabled = true;
     DWORD gameOverlayBackends = 15; // D3D11, D3D12, OpenGL, Vulkan.
+    std::vector<std::wstring> gameOverlayExcludedApps;
     int refreshIntervalMs = 1000;
     UINT hotkeyModifiers = MOD_ALT, hotkeyKey = VK_F1;
     DWORD visibleMetrics = OverlayMetric::All;

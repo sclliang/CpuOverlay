@@ -6,6 +6,7 @@ namespace GameOverlay {
 // All rendering callbacks serialize on this mutex and preserve the game's API state.
 std::recursive_mutex& RenderMutex();
 const Frame* ReadFrame(uint32_t backend);
+bool BeginDraw(const Frame& frame, uint32_t backend);
 void ReportDraw(uint32_t backend, uint32_t width, uint32_t height);
 void ReportError(uint32_t backend, LONG error);
 Rect WindowPlacement(const Frame& frame, HWND window, uint32_t width, uint32_t height);

@@ -1,6 +1,6 @@
 # 内置游戏显示依赖
 
-这些源码在构建时编译进 CpuOverlayGame64.dll。用户无需安装 RTSS、Dear ImGui、MinHook 或 Vulkan SDK；Vulkan 运行库由显卡驱动提供。
+这些源码在构建时编译进 CpuOverlayGame64-1.12.2.0.dll。用户无需安装 RTSS、Dear ImGui、MinHook 或 Vulkan SDK；Vulkan 运行库由显卡驱动提供。
 
 - MinHook v1.3.4：`TsudaKageyu/minhook`，BSD 2-Clause。仅用于用户态图形接口拦截。
 - Vulkan-Headers v1.3.296：`KhronosGroup/Vulkan-Headers`，许可见 `LICENSE-Vulkan-Headers.txt`。

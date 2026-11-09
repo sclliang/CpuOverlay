@@ -5,9 +5,10 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include "app_version.h"
 
 namespace GameOverlay {
-constexpr uint32_t Magic = 0x434f4731, Version = 1;
+constexpr uint32_t Magic = 0x434f4731, Version = 2;
 constexpr uint32_t D3D11 = 1, D3D12 = 2, OpenGL = 4, Vulkan = 8, All = 15;
 constexpr uint32_t MaxWidth = 4096, MaxHeight = 2048;
 constexpr uint32_t MaxPixels = MaxWidth * MaxHeight * 4;
@@ -20,10 +21,11 @@ struct alignas(8) Header {
     uint32_t position;
     int32_t x, y, margin;
     float rasterScale;
-    uint32_t reserved;
+    uint32_t drawAllowed;
     alignas(8) volatile LONG64 lastDrawTick;
     volatile LONG drawPid, drawBackend, drawCount, drawError;
     volatile LONG viewportWidth, viewportHeight;
+    volatile LONG readyPid, readyBackend, readyCount;
 };
 static_assert(sizeof(Header) % 8 == 0);
 constexpr size_t MappingBytes = sizeof(Header) + MaxPixels;
@@ -32,7 +34,7 @@ inline std::wstring ChannelName(const wchar_t* suffix) {
     wchar_t probe[64]{};
     GetEnvironmentVariableW(L"CPUOVERLAY_CHANNEL_SUFFIX", probe, ARRAYSIZE(probe));
     const std::wstring extra = std::wstring(probe).rfind(L".Probe.", 0) == 0 ? probe : L"";
-    return L"Local\\sixunited.CpuOverlay.GameOverlay." + std::to_wstring(session) + extra + suffix;
+    return L"Local\\sixunited.CpuOverlay.GameOverlay.v" + std::to_wstring(Version) + L"." CPUOVERLAY_VERSION_WTEXT L"." + std::to_wstring(session) + extra + suffix;
 }
 inline const wchar_t* BackendName(uint32_t backend) {
     switch (backend) { case D3D11: return L"D3D11"; case D3D12: return L"D3D12";

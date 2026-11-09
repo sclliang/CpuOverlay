@@ -1,5 +1,6 @@
 #include "settings_dialog.h"
 #include "overlay_renderer.h"
+#include "game_overlay_applications.h"
 #include "../resources/settings_ids.h"
 #include <commctrl.h>
 #include <commdlg.h>
@@ -7,6 +8,7 @@
 #include <set>
 #include <map>
 #include <cmath>
+#include <filesystem>
 
 namespace {
 constexpr UINT_PTR kGameStatusTimer = 0x474f;
@@ -135,6 +137,83 @@ void FitToWorkArea(HWND window, std::vector<HFONT>& scaledFonts, const RECT& wor
         SetWindowPos(control, nullptr, scaled(rect.left), scaled(rect.top), scaled(rect.right - rect.left), scaled(height), SWP_NOZORDER | SWP_NOACTIVATE);
     }
     SetWindowPos(window, nullptr, 0, 0, scaled(client.right) + frameWidth, scaled(client.bottom) + frameHeight, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+struct AppsDialog {
+    std::vector<std::wstring> excluded, entries;
+    HBRUSH background;
+    std::vector<HFONT> fonts;
+    ~AppsDialog() { for (auto font : fonts) DeleteObject(font); }
+};
+void ReadApps(HWND window, AppsDialog& dialog) {
+    dialog.excluded.clear(); const HWND list = GetDlgItem(window, IDC_APP_LIST);
+    for (size_t i = 0; i < dialog.entries.size(); ++i)
+        if (ListView_GetCheckState(list, static_cast<int>(i))) dialog.excluded.push_back(dialog.entries[i]);
+}
+void FillApps(HWND window, AppsDialog& dialog) {
+    auto running = GameOverlay::RunningApplications(), recent = GameOverlay::RecentApplications();
+    auto add = [&](const auto& names) { for (const auto& name : names) if (!GameOverlay::ContainsApplication(dialog.entries, name)) dialog.entries.push_back(name); };
+    add(dialog.excluded); add(running); add(recent);
+    std::sort(dialog.entries.begin(), dialog.entries.end(), [](const auto& a, const auto& b) { return _wcsicmp(a.c_str(), b.c_str()) < 0; });
+    const HWND list = GetDlgItem(window, IDC_APP_LIST); ListView_DeleteAllItems(list);
+    for (size_t i = 0; i < dialog.entries.size(); ++i) {
+        auto& name = dialog.entries[i]; LVITEMW item{}; item.mask = LVIF_TEXT; item.iItem = static_cast<int>(i); item.pszText = name.data();
+        ListView_InsertItem(list, &item); ListView_SetCheckState(list, item.iItem, GameOverlay::ContainsApplication(dialog.excluded, name));
+        const wchar_t* state = GameOverlay::ContainsApplication(running, name) ? L"运行中" : GameOverlay::ContainsApplication(recent, name) ? L"曾接入" : L"已添加";
+        ListView_SetItemText(list, item.iItem, 1, const_cast<LPWSTR>(state));
+    }
+}
+INT_PTR CALLBACK AppsProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    auto dialog = reinterpret_cast<AppsDialog*>(GetWindowLongPtrW(window, DWLP_USER));
+    if (message == WM_INITDIALOG) {
+        dialog = reinterpret_cast<AppsDialog*>(lParam); SetWindowLongPtrW(window, DWLP_USER, lParam);
+        MONITORINFO monitor{sizeof(monitor)}; GetMonitorInfoW(MonitorFromWindow(GetParent(window), MONITOR_DEFAULTTONEAREST), &monitor);
+        FitToWorkArea(window, dialog->fonts, monitor.rcWork);
+        const HWND list = GetDlgItem(window, IDC_APP_LIST);
+        ListView_SetExtendedListViewStyle(list, LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+        ListView_SetBkColor(list, RGB(255, 255, 255)); ListView_SetTextBkColor(list, RGB(255, 255, 255));
+        RECT rect{}; GetClientRect(list, &rect);
+        LVCOLUMNW column{}; column.mask = LVCF_TEXT | LVCF_WIDTH; column.cx = rect.right * 2 / 3; column.pszText = const_cast<LPWSTR>(L"应用 / EXE 文件名");
+        ListView_InsertColumn(list, 0, &column); column.cx = rect.right - column.cx - 8; column.pszText = const_cast<LPWSTR>(L"状态"); ListView_InsertColumn(list, 1, &column);
+        FillApps(window, *dialog);
+        RECT owner{}, bounds{}; GetWindowRect(GetParent(window), &owner); GetWindowRect(window, &bounds);
+        SetWindowPos(window, nullptr, std::max(monitor.rcWork.left, owner.left + (owner.right - owner.left - bounds.right + bounds.left) / 2),
+            std::max(monitor.rcWork.top, owner.top + (owner.bottom - owner.top - bounds.bottom + bounds.top) / 2), 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+        return TRUE;
+    }
+    if (!dialog) return FALSE;
+    if (message == WM_CTLCOLORDLG) return reinterpret_cast<INT_PTR>(dialog->background);
+    if (message == WM_CTLCOLORSTATIC) {
+        SetTextColor(reinterpret_cast<HDC>(wParam), RGB(30, 41, 59)); SetBkColor(reinterpret_cast<HDC>(wParam), RGB(248, 250, 252));
+        return reinterpret_cast<INT_PTR>(dialog->background);
+    }
+    if (message == WM_CLOSE) { EndDialog(window, IDCANCEL); return TRUE; }
+    if (message != WM_COMMAND) return FALSE;
+    const int id = LOWORD(wParam);
+    if (id == IDCANCEL) { EndDialog(window, IDCANCEL); return TRUE; }
+    if (id == IDOK) {
+        ReadApps(window, *dialog);
+        if (dialog->excluded.size() > GameOverlay::MaxExcludedApplications) {
+            MessageBoxW(window, L"最多排除 64 个应用。", L"应用内显示排除", MB_OK | MB_ICONINFORMATION); return TRUE;
+        }
+        EndDialog(window, IDOK); return TRUE;
+    }
+    if (id == IDC_APP_REFRESH) { ReadApps(window, *dialog); FillApps(window, *dialog); return TRUE; }
+    if (id == IDC_APP_ADD) {
+        std::vector<wchar_t> path(32768, 0); OPENFILENAMEW picker{sizeof(picker)};
+        picker.hwndOwner = window; picker.lpstrFilter = L"应用程序 (*.exe)\0*.exe\0\0"; picker.lpstrFile = path.data(); picker.nMaxFile = static_cast<DWORD>(path.size());
+        picker.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+        if (GetOpenFileNameW(&picker)) {
+            const auto name = std::filesystem::path(path.data()).filename().wstring();
+            if (GameOverlay::ValidApplicationName(name)) {
+                ReadApps(window, *dialog);
+                if (!GameOverlay::ContainsApplication(dialog->excluded, name)) dialog->excluded.push_back(name);
+                FillApps(window, *dialog);
+            }
+        }
+        return TRUE;
+    }
+    return FALSE;
 }
 
 void FillNames(HWND window, const NamesDialog& dialog) {
@@ -360,6 +439,15 @@ INT_PTR CALLBACK Procedure(HWND window, UINT message, WPARAM wParam, LPARAM lPar
     case WM_COMMAND: {
         const int id = LOWORD(wParam), notification = HIWORD(wParam);
         if (id == IDCANCEL) { EndDialog(window, IDCANCEL); return TRUE; }
+        if (id == IDC_GAME_APPS) {
+            AppsDialog apps{d->current.gameOverlayExcludedApps, {}, d->background, {}};
+            if (DialogBoxParamW(reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(window, GWLP_HINSTANCE)), MAKEINTRESOURCEW(IDD_GAME_APPS),
+                window, AppsProcedure, reinterpret_cast<LPARAM>(&apps)) == IDOK) {
+                d->current.gameOverlayExcludedApps = std::move(apps.excluded);
+                SetDlgItemTextW(window, IDC_SETTINGS_STATUS, L"应用排除已修改；点击“应用”或“确定”保存。");
+            }
+            return TRUE;
+        }
         if (id == IDC_EDIT_NAMES) {
             NamesDialog names{d->current.metricLabels, d->background, {}};
             const auto result = DialogBoxParamW(reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(window, GWLP_HINSTANCE)),
@@ -417,7 +505,7 @@ INT_PTR CALLBACK Procedure(HWND window, UINT message, WPARAM wParam, LPARAM lPar
 }
 
 void ShowSettingsDialog(HWND owner, HINSTANCE instance, const OverlaySettings& settings, const SettingsCallbacks& callbacks) {
-    INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_HOTKEY_CLASS | ICC_STANDARD_CLASSES};
+    INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_HOTKEY_CLASS | ICC_STANDARD_CLASSES | ICC_LISTVIEW_CLASSES};
     InitCommonControlsEx(&controls);
     Dialog dialog; dialog.current = settings; dialog.callbacks = callbacks;
     if (DialogBoxParamW(instance, MAKEINTRESOURCEW(IDD_SETTINGS), owner, Procedure, reinterpret_cast<LPARAM>(&dialog)) == -1)

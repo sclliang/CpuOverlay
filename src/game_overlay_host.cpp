@@ -1,5 +1,6 @@
 #include "game_overlay_host.h"
 #include "game_overlay_registration.h"
+#include "app_version.h"
 #include <tlhelp32.h>
 #include <sddl.h>
 #include <atomic>
@@ -91,8 +92,9 @@ struct NativeGameOverlay::Impl {
     fs::path folder = ExecutableFolder() / L"bin" / L"game";
     HANDLE mapping = nullptr, mutex = nullptr;
     Header* shared = nullptr;
-    std::atomic<bool> stop{false}, enabled{false}, visible{false};
+    std::atomic<bool> stop{false}, enabled{false}, visible{false}, desktopVisible{true};
     std::atomic<DWORD> target{0}, attachError{0}, layerError{0};
+    std::atomic<LONG> drawBaseline{0}, readyBaseline{0};
     std::thread worker;
     DWORD backendMask = GameOverlay::All;
     bool layerRegistered = false;
@@ -110,6 +112,16 @@ struct NativeGameOverlay::Impl {
     bool Lock() const {
         if (!shared || !mutex) return false;
         const auto result = WaitForSingleObject(mutex, 30); return result == WAIT_OBJECT_0 || result == WAIT_ABANDONED;
+    }
+    bool Confirmed(DWORD pid) const {
+        return shared && pid &&
+            static_cast<DWORD>(InterlockedCompareExchange(&shared->drawPid, 0, 0)) == pid &&
+            InterlockedCompareExchange(&shared->drawCount, 0, 0) != drawBaseline.load();
+    }
+    bool Ready(DWORD pid) const {
+        return shared && pid &&
+            static_cast<DWORD>(InterlockedCompareExchange(&shared->readyPid, 0, 0)) == pid &&
+            InterlockedCompareExchange(&shared->readyCount, 0, 0) != readyBaseline.load();
     }
     void Open() {
         Handle token; // Open objects only to this user and SYSTEM, at medium integrity.
@@ -150,11 +162,9 @@ struct NativeGameOverlay::Impl {
             const DWORD pid = enabled.load() ? target.load() : 0;
             if (pid && Candidate(pid)) {
                 const auto now = GetTickCount64();
-                const auto drawTick = shared ? static_cast<ULONGLONG>(InterlockedCompareExchange64(&shared->lastDrawTick, 0, 0)) : 0;
-                const bool drawing = shared && static_cast<DWORD>(InterlockedCompareExchange(&shared->drawPid, 0, 0)) == pid &&
-                    drawTick && now >= drawTick && now - drawTick < 3000;
+                const bool drawing = Confirmed(pid);
                 if (!drawing && (!attempts.count(pid) || now - attempts[pid] >= 15000)) {
-                    attempts[pid] = now; attachError = Attach(pid, folder / L"CpuOverlayGame64.dll", stop);
+                    attempts[pid] = now; attachError = Attach(pid, folder / CPUOVERLAY_GAME_MODULE_WNAME, stop);
                 }
             }
             for (int i = 0; i < 5 && !stop.load(); ++i) Sleep(100);
@@ -168,7 +178,7 @@ std::wstring GameOverlayStatus::Text() const {
     if (error == ERROR_BAD_EXE_FORMAT) return L"当前游戏内显示支持 64 位程序";
     if (renderError) return L"游戏内绘制尚未就绪，桌面显示仍可使用";
     if (layerError) return L"Vulkan 尚未就绪，请检查程序文件是否完整";
-    return L"等待前台游戏；Vulkan 游戏请在本程序之后启动";
+    return L"等待前台应用；排除的应用使用桌面显示";
 }
 NativeGameOverlay::NativeGameOverlay(bool registerVulkanLayer) : impl_(std::make_unique<Impl>(registerVulkanLayer)) {}
 NativeGameOverlay::~NativeGameOverlay() = default;
@@ -192,12 +202,29 @@ bool NativeGameOverlay::Publish(Gdiplus::Bitmap& bitmap, const OverlaySettings& 
     h.position = settings.position; h.x = settings.x; h.y = settings.y; h.margin = settings.margin; h.rasterScale = rasterScale;
     h.generation = ++p.generation; h.heartbeat = GetTickCount64(); ReleaseMutex(p.mutex); bitmap.UnlockBits(&pixels); return true;
 }
-void NativeGameOverlay::Tick(DWORD foregroundPid, bool hasFrames, bool visible) {
-    auto& p = *impl_; const DWORD pid = hasFrames && p.enabled.load() ? foregroundPid : 0; p.target = pid; p.visible = visible;
+void NativeGameOverlay::Tick(DWORD foregroundPid, bool hasFrames, bool visible, bool allowInternal) {
+    auto& p = *impl_;
+    const DWORD previous = p.target.load();
+    // No new Present means the last image can still be on screen. Once the
+    // current target has acknowledged drawing, do not bring back a second
+    // desktop overlay merely because the application pauses its rendering.
+    const bool retained = foregroundPid == previous && p.Confirmed(previous);
+    const DWORD pid = visible && allowInternal && p.enabled.load() && (hasFrames || retained) ? foregroundPid : 0;
+    if (pid != previous) {
+        p.drawBaseline = p.shared ? InterlockedCompareExchange(&p.shared->drawCount, 0, 0) : 0;
+        p.readyBaseline = p.shared ? InterlockedCompareExchange(&p.shared->readyCount, 0, 0) : 0;
+        p.attachError = 0;
+        if (p.Lock()) { p.shared->drawError = 0; ReleaseMutex(p.mutex); }
+    }
+    p.target = pid; p.visible = visible;
     if (p.Lock()) { p.shared->targetPid = pid; p.shared->heartbeat = GetTickCount64(); p.shared->visible = visible; ReleaseMutex(p.mutex); }
 }
 void NativeGameOverlay::SetVisible(bool visible) {
     auto& p = *impl_; p.visible = visible; if (p.Lock()) { p.shared->visible = visible; p.shared->heartbeat = GetTickCount64(); ReleaseMutex(p.mutex); }
+}
+void NativeGameOverlay::SetDesktopVisible(bool visible) {
+    auto& p = *impl_; p.desktopVisible = visible;
+    if (p.Lock()) { p.shared->drawAllowed = visible ? 0u : 1u; ReleaseMutex(p.mutex); }
 }
 GameOverlayStatus NativeGameOverlay::Status() const {
     const auto& p = *impl_; GameOverlayStatus status; status.enabled = p.enabled.load(); status.targetPid = p.target.load();
@@ -207,9 +234,10 @@ GameOverlayStatus NativeGameOverlay::Status() const {
         status.frames = InterlockedCompareExchange(&p.shared->drawCount, 0, 0);
         status.renderError = InterlockedCompareExchange(&p.shared->drawError, 0, 0);
         status.width = InterlockedCompareExchange(&p.shared->viewportWidth, 0, 0); status.height = InterlockedCompareExchange(&p.shared->viewportHeight, 0, 0);
-        const auto tick = static_cast<ULONGLONG>(InterlockedCompareExchange64(&p.shared->lastDrawTick, 0, 0));
-        const auto pid = static_cast<DWORD>(InterlockedCompareExchange(&p.shared->drawPid, 0, 0));
-        const auto now = GetTickCount64(); status.active = status.enabled && p.visible.load() && status.targetPid && pid == status.targetPid && tick && now >= tick && now - tick < 1500;
+        const DWORD readyBackend = static_cast<DWORD>(InterlockedCompareExchange(&p.shared->readyBackend, 0, 0));
+        status.ready = status.enabled && p.visible.load() && p.Ready(status.targetPid) && (p.backendMask & readyBackend) && !status.renderError;
+        status.active = status.enabled && p.visible.load() && !p.desktopVisible.load() && p.Confirmed(status.targetPid) &&
+            (p.backendMask & status.backend) && !status.renderError;
     }
     return status;
 }

@@ -1,10 +1,11 @@
 #include "overlay_settings.h"
+#include "game_overlay_applications.h"
 #include <algorithm>
 #include <iterator>
 #include <cwctype>
 
 namespace {
-constexpr wchar_t kValue[] = L"DisplaySettingsV8";
+constexpr wchar_t kValue[] = L"DisplaySettingsV9";
 constexpr unsigned kLegacyMetricCount = 15;
 constexpr unsigned kVersion6MetricCount = 17;
 struct SavedSettings {
@@ -26,6 +27,11 @@ struct SavedSettingsV7 {
     std::array<std::array<wchar_t, OverlayMetric::MaxLabelLength + 1>, OverlayMetric::Count> labels{};
 };
 struct SavedSettingsV8 { SavedSettingsV7 profile; DWORD gameEnabled = 1, gameBackends = 15; };
+struct SavedSettingsV9 {
+    SavedSettingsV8 profile;
+    DWORD excludedCount = 0;
+    std::array<std::array<wchar_t, MAX_PATH>, GameOverlay::MaxExcludedApplications> excluded{};
+};
 DWORD Dword(const wchar_t* key, const wchar_t* name, DWORD fallback) {
     DWORD value = 0, bytes = sizeof(value);
     return RegGetValueW(HKEY_CURRENT_USER, key, name, RRF_RT_REG_DWORD, nullptr, &value, &bytes) == ERROR_SUCCESS ? value : fallback;
@@ -78,6 +84,16 @@ bool ValidateOverlaySettings(const OverlaySettings& s, std::wstring& error) {
         (!(s.hotkeyModifiers & (MOD_ALT | MOD_CONTROL | MOD_WIN)) && !(s.hotkeyKey >= VK_F1 && s.hotkeyKey <= VK_F11)))
         error = L"请使用 Ctrl、Alt 或 Win 加一个按键，或 F1–F11。F12 及 Esc、Tab、回车、空格不作为全局快捷键。";
     else {
+        if (s.gameOverlayExcludedApps.size() > GameOverlay::MaxExcludedApplications) {
+            error = L"最多排除 64 个应用。"; return false;
+        }
+        std::vector<std::wstring> applications;
+        for (const auto& name : s.gameOverlayExcludedApps) {
+            if (!GameOverlay::ValidApplicationName(name) || GameOverlay::ContainsApplication(applications, name)) {
+                error = L"应用排除列表需为不重复的 EXE 文件名。"; return false;
+            }
+            applications.push_back(name);
+        }
         DWORD seen = 0;
         for (const auto metric : s.metricOrder) {
             if (metric >= OverlayMetric::Count || (seen & (1u << metric))) {
@@ -99,22 +115,24 @@ bool ValidateOverlaySettings(const OverlaySettings& s, std::wstring& error) {
 OverlaySettings LoadOverlaySettings(const wchar_t* key) {
     // Keep V1-V6 intact for rollback. Enable added metrics on a V2 upgrade,
     // except when the user deliberately hid every metric.
-    for (DWORD version : {8u, 7u, 6u, 5u, 4u, 3u, 2u, 1u}) {
+    for (DWORD version : {9u, 8u, 7u, 6u, 5u, 4u, 3u, 2u, 1u}) {
+        SavedSettingsV9 version9{};
         SavedSettingsV8 version8{};
         SavedSettingsV7 current{};
         SavedSettingsV6 version6{};
         SavedSettingsV5 stored{};
         auto& saved = stored.profile.profile.base;
-        const DWORD expected = version == 8 ? sizeof(version8) : version == 7 ? sizeof(current) : version == 6 ? sizeof(version6) :
+        const DWORD expected = version == 9 ? sizeof(version9) : version == 8 ? sizeof(version8) : version == 7 ? sizeof(current) : version == 6 ? sizeof(version6) :
             version == 5 ? sizeof(stored) : version == 4 ? sizeof(stored.profile) :
             version >= 2 ? sizeof(stored.profile.profile) : sizeof(saved);
         DWORD bytes = expected;
-        const auto name = version == 8 ? kValue : version == 7 ? L"DisplaySettingsV7" : version == 6 ? L"DisplaySettingsV6" : version == 5 ? L"DisplaySettingsV5" : version == 4 ? L"DisplaySettingsV4" : version == 3 ? L"DisplaySettingsV3" :
+        const auto name = version == 9 ? kValue : version == 8 ? L"DisplaySettingsV8" : version == 7 ? L"DisplaySettingsV7" : version == 6 ? L"DisplaySettingsV6" : version == 5 ? L"DisplaySettingsV5" : version == 4 ? L"DisplaySettingsV4" : version == 3 ? L"DisplaySettingsV3" :
             version == 2 ? L"DisplaySettingsV2" : L"DisplaySettingsV1";
-        void* data = version == 8 ? static_cast<void*>(&version8) : version == 7 ? static_cast<void*>(&current) :
+        void* data = version == 9 ? static_cast<void*>(&version9) : version == 8 ? static_cast<void*>(&version8) : version == 7 ? static_cast<void*>(&current) :
             version == 6 ? static_cast<void*>(&version6) : static_cast<void*>(&stored);
         if (RegGetValueW(HKEY_CURRENT_USER, key, name, RRF_RT_REG_BINARY, nullptr, data, &bytes) != ERROR_SUCCESS || bytes != expected) continue;
-        if (version == 8) { current = version8.profile; stored = current.legacy; }
+        if (version == 9) version8 = version9.profile;
+        if (version >= 8) { current = version8.profile; stored = current.legacy; }
         else if (version == 7) stored = current.legacy;
         else if (version == 6) stored = version6.legacy;
         if (saved.version != version || saved.bytes != expected) continue;
@@ -171,9 +189,19 @@ OverlaySettings LoadOverlaySettings(const wchar_t* key) {
             }
             if (!valid) continue;
         }
-        if (version == 8) {
+        if (version >= 8) {
             if (version8.gameEnabled > 1) continue;
             s.gameOverlayEnabled = version8.gameEnabled != 0; s.gameOverlayBackends = version8.gameBackends;
+        }
+        if (version == 9) {
+            if (version9.excludedCount > GameOverlay::MaxExcludedApplications) continue;
+            bool valid = true;
+            for (DWORD i = 0; i < version9.excludedCount; ++i) {
+                const auto& item = version9.excluded[i];
+                if (std::find(item.begin(), item.end(), L'\0') == item.end()) { valid = false; break; }
+                s.gameOverlayExcludedApps.emplace_back(item.data());
+            }
+            if (!valid) continue;
         }
         s.font = saved.font; s.monitor = saved.monitor;
         std::wstring error;
@@ -192,11 +220,15 @@ OverlaySettings LoadOverlaySettings(const wchar_t* key) {
 LSTATUS SaveOverlaySettings(const OverlaySettings& s, const wchar_t* key) {
     std::wstring error;
     if (!ValidateOverlaySettings(s, error)) return ERROR_INVALID_DATA;
-    SavedSettingsV8 version8{};
+    SavedSettingsV9 version9{};
+    auto& version8 = version9.profile;
     auto& current = version8.profile;
     auto& stored = current.legacy;
     auto& saved = stored.profile.profile.base;
-    saved.version = 8; saved.bytes = sizeof(version8);
+    saved.version = 9; saved.bytes = sizeof(version9);
+    version9.excludedCount = static_cast<DWORD>(s.gameOverlayExcludedApps.size());
+    for (size_t i = 0; i < s.gameOverlayExcludedApps.size(); ++i)
+        wcscpy_s(version9.excluded[i].data(), version9.excluded[i].size(), s.gameOverlayExcludedApps[i].c_str());
     version8.gameEnabled = s.gameOverlayEnabled ? 1 : 0; version8.gameBackends = s.gameOverlayBackends;
     stored.profile.profile.visibleMetrics = s.visibleMetrics;
     stored.profile.order = s.metricOrder;
@@ -216,7 +248,7 @@ LSTATUS SaveOverlaySettings(const OverlaySettings& s, const wchar_t* key) {
     LSTATUS result = RegCreateKeyExW(HKEY_CURRENT_USER, key, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &opened, nullptr);
     if (result != ERROR_SUCCESS) return result;
     // One value prevents an interrupted save from leaving a partially applied profile.
-    result = RegSetValueExW(opened, kValue, 0, REG_BINARY, reinterpret_cast<const BYTE*>(&version8), sizeof(version8));
+    result = RegSetValueExW(opened, kValue, 0, REG_BINARY, reinterpret_cast<const BYTE*>(&version9), sizeof(version9));
     RegCloseKey(opened);
     return result;
 }

@@ -260,6 +260,7 @@ VkResult Prepare(Device& device, Swapchain& chain, uint32_t image, uint32_t fami
     if (!chain.renderer) chain.renderer = CreateRenderer(device, chain, family);
     if (!chain.renderer) return VK_ERROR_INITIALIZATION_FAILED;
     if (chain.renderer->family != family) return VK_ERROR_FEATURE_NOT_PRESENT;
+    if (!BeginDraw(source, Vulkan)) return VK_NOT_READY;
     const auto result = chain.renderer->Record(image, source);
     if (result != VK_SUCCESS) return result;
     const auto& f = chain.renderer->frames[image]; command = f.command; finished = f.finished; fence = f.fence; return VK_SUCCESS;

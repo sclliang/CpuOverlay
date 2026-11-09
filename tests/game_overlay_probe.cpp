@@ -1,4 +1,5 @@
 #include "game_overlay_host.h"
+#include "game_overlay_deployment.h"
 #include <d3d11.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
@@ -8,6 +9,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <vector>
+#include <fstream>
 
 using Microsoft::WRL::ComPtr;
 namespace {
@@ -19,6 +21,74 @@ bool Red(const unsigned char* pixel) { return abs(int(pixel[2]) - 220) <= 5 && a
 POINT SamplePoint() {
     const float scale = static_cast<float>(GetDpiForWindow(window)) / 96;
     return {static_cast<LONG>(20 * scale), static_cast<LONG>(20 * scale)};
+}
+void RoutingProbe() {
+    NativeGameOverlay host(false); host.Configure(true, GameOverlay::All);
+    OverlaySettings settings; Gdiplus::Bitmap bitmap(8, 8, PixelFormat32bppPARGB);
+    Require(host.Publish(bitmap, settings, 1), "Routing bitmap");
+    const DWORD pid = GetCurrentProcessId();
+    HANDLE mapping = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, GameOverlay::ChannelName(L".Frame").c_str());
+    Require(mapping != nullptr, "Routing channel");
+    auto* header = static_cast<GameOverlay::Header*>(MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, GameOverlay::MappingBytes));
+    Require(header != nullptr, "Routing shared state");
+    struct Cleanup { HANDLE mapping; void* view; ~Cleanup() { UnmapViewOfFile(view); CloseHandle(mapping); } } cleanup{mapping, header};
+    host.Tick(pid, true, true, false);
+    Require(host.Status().targetPid == 0 && header->targetPid == 0 && !header->drawAllowed, "Excluded application must keep the desktop route");
+    host.Tick(pid, true, true);
+    Require(!host.Status().ready && !host.Status().active && !header->drawAllowed, "Desktop visible before renderer handshake");
+    InterlockedExchange(&header->readyPid, static_cast<LONG>(pid)); InterlockedExchange(&header->readyBackend, GameOverlay::D3D11);
+    InterlockedIncrement(&header->readyCount);
+    Require(host.Status().ready && !host.Status().active && !header->drawAllowed, "Ready renderer cannot draw over visible desktop overlay");
+    host.SetDesktopVisible(false);
+    InterlockedExchange(&header->drawPid, static_cast<LONG>(pid)); InterlockedExchange(&header->drawBackend, GameOverlay::D3D11);
+    InterlockedIncrement(&header->drawCount); InterlockedExchange64(&header->lastDrawTick, 1);
+    Require(host.Status().active && header->drawAllowed, "Internal route starts only after desktop hide");
+    host.Tick(pid, false, true);
+    Require(host.Status().active && header->targetPid == pid, "Idle Present stream must not bring back a duplicate desktop overlay");
+    host.Tick(pid, true, true, false); host.SetDesktopVisible(true);
+    Require(!host.Status().active && !host.Status().ready && !header->targetPid && !header->drawAllowed, "Exclusion revokes the internal route and restores desktop ownership");
+    host.Tick(pid, true, true);
+    Require(!host.Status().ready && !host.Status().active, "Old acknowledgements cannot activate a new routing session");
+    host.SetVisible(false);
+    Require(!host.Status().ready && !host.Status().active, "Hidden monitor owns neither display route");
+    std::cout << "Routing handshake, pause retention, exclusions and session reset: PASS\n";
+}
+void DeploymentProbe(const std::filesystem::path& source) {
+    namespace fs = std::filesystem;
+    struct Fixture {
+        fs::path folder = fs::temp_directory_path() / (L"CpuOverlay.Deployment." + std::to_wstring(GetCurrentProcessId()) + L"." + std::to_wstring(GetTickCount64()));
+        HMODULE legacy = nullptr, current = nullptr;
+        ~Fixture() {
+            if (current) FreeLibrary(current); if (legacy) FreeLibrary(legacy);
+            DeleteFileW((folder / L"CpuOverlayGame64.dll").c_str());
+            DeleteFileW((folder / CPUOVERLAY_GAME_MODULE_WNAME).c_str());
+            DeleteFileW((folder / L"CpuOverlayGame64-0.0.0.0.dll").c_str());
+            RemoveDirectoryW(folder.c_str());
+        }
+    } fixture;
+    fs::create_directory(fixture.folder);
+    const auto legacy = fixture.folder / L"CpuOverlayGame64.dll", current = fixture.folder / CPUOVERLAY_GAME_MODULE_WNAME;
+    std::ifstream input(source, std::ios::binary); std::vector<BYTE> bytes((std::istreambuf_iterator<char>(input)), {});
+    Require(!bytes.empty(), "Deployment source image");
+    fs::copy_file(source, legacy);
+    fixture.legacy = LoadLibraryW(legacy.c_str()); Require(fixture.legacy != nullptr, "Load legacy module fixture");
+    HANDLE blocked = CreateFileW(legacy.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    const DWORD reason = GetLastError(); if (blocked != INVALID_HANDLE_VALUE) CloseHandle(blocked);
+    Require(blocked == INVALID_HANDLE_VALUE && (reason == ERROR_SHARING_VIOLATION || reason == ERROR_ACCESS_DENIED), "Reproduce the installed DLL write lock");
+    std::cout << "loaded_legacy_write_error=" << reason << '\n';
+    Require(GameOverlayDeployment::InstallImage(current, bytes.data(), static_cast<DWORD>(bytes.size())) == ERROR_SUCCESS, "Install a new version while legacy is loaded");
+    fixture.current = LoadLibraryW(current.c_str());
+    Require(fixture.current && fixture.current != fixture.legacy, "New module must have a distinct loader identity");
+    Require(GameOverlayDeployment::InstallImage(current, bytes.data(), static_cast<DWORD>(bytes.size())) == ERROR_SUCCESS, "Repair an identical current module while it is loaded");
+    const auto unrelated = fixture.folder / L"CpuOverlayGame64-0.0.0.0.dll";
+    { std::ofstream file(unrelated); file << "Not a CpuOverlay DLL"; }
+    const auto retained = GameOverlayDeployment::RetireModules(fixture.folder, current.filename().wstring());
+    Require(retained.size() == 1 && fs::exists(legacy) && fs::exists(current) && fs::exists(unrelated), "Upgrade preserves a loaded old module and unrelated files");
+    FreeLibrary(fixture.legacy); fixture.legacy = nullptr;
+    Require(GameOverlayDeployment::RetireModules(fixture.folder, current.filename().wstring()).empty() && !fs::exists(legacy), "Remove a retired module after its process releases it");
+    FreeLibrary(fixture.current); fixture.current = nullptr;
+    Require(GameOverlayDeployment::RetireModules(fixture.folder, L"").empty() && !fs::exists(current) && fs::exists(unrelated), "Retirement only deletes verified product DLLs");
+    std::cout << "Locked-file upgrade, loaded-module repair and bounded retirement: PASS\n";
 }
 void D3D11Probe() {
     DXGI_SWAP_CHAIN_DESC desc{}; desc.BufferDesc.Width = 320; desc.BufferDesc.Height = 180;
@@ -118,16 +188,18 @@ int wmain(int argc, wchar_t** argv) {
     try {
         Require(argc == 3, "Usage: CpuOverlayGameProbe <D3D11|D3D12|OpenGL|Vulkan> <game DLL>");
         const std::wstring api = argv[1]; const std::filesystem::path dll = std::filesystem::absolute(argv[2]);
-        const DWORD backend = (api == L"D3D11" || api == L"Remote" || api == L"RemoteChild") ? GameOverlay::D3D11 : api == L"D3D12" ? GameOverlay::D3D12 : api.rfind(L"OpenGL", 0) == 0 ? GameOverlay::OpenGL : api == L"Vulkan" ? GameOverlay::Vulkan : 0;
+        const DWORD backend = (api == L"D3D11" || api == L"Remote" || api == L"RemoteChild" || api == L"Routing" || api == L"Deployment") ? GameOverlay::D3D11 : api == L"D3D12" ? GameOverlay::D3D12 : api.rfind(L"OpenGL", 0) == 0 ? GameOverlay::OpenGL : api == L"Vulkan" ? GameOverlay::Vulkan : 0;
         Require(backend != 0, "Unknown API");
         if (api != L"RemoteChild") SetEnvironmentVariableW(L"CPUOVERLAY_CHANNEL_SUFFIX", (L".Probe." + std::to_wstring(GetCurrentProcessId())).c_str());
         Gdiplus::GdiplusStartupInput startup; ULONG_PTR token = 0; Require(Gdiplus::GdiplusStartup(&token, &startup, nullptr) == Gdiplus::Ok, "GDI+ startup");
+        if (api == L"Routing") { RoutingProbe(); std::cout << "PASS\n"; return 0; }
+        if (api == L"Deployment") { DeploymentProbe(dll); std::cout << "PASS\n"; return 0; }
         WNDCLASSW wc{}; wc.hInstance = GetModuleHandleW(nullptr); wc.lpfnWndProc = DefWindowProcW; wc.lpszClassName = L"CpuOverlay.NativeProbe"; wc.style = CS_OWNDC;
         RegisterClassW(&wc); window = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName, L"CpuOverlay rendering probe", WS_POPUP,
             0, 0, 320, 180, nullptr, nullptr, wc.hInstance, nullptr); Require(window != nullptr, "Probe window");
         if (api == L"RemoteChild") {
             for (unsigned i = 0; i < 50; ++i) {
-                if (GetModuleHandleW(L"CpuOverlayGame64.dll")) {
+                if (GetModuleHandleW(dll.filename().c_str())) {
                     try { D3D11Probe(); DestroyWindow(window); window = nullptr; return 0; } catch (...) {}
                 }
                 Sleep(100);
@@ -148,7 +220,9 @@ int wmain(int argc, wchar_t** argv) {
                 "Start remote rendering fixture");
             CloseHandle(child.hThread); DWORD wait = WAIT_TIMEOUT;
             for (unsigned i = 0; i < 75 && wait == WAIT_TIMEOUT; ++i) {
-                host.Tick(child.dwProcessId, true, true); wait = WaitForSingleObject(child.hProcess, 200);
+                host.Tick(child.dwProcessId, true, true);
+                if (host.Status().ready) host.SetDesktopVisible(false);
+                wait = WaitForSingleObject(child.hProcess, 200);
             }
             if (wait == WAIT_TIMEOUT) TerminateProcess(child.hProcess, 9);
             DWORD code = 0; GetExitCodeProcess(child.hProcess, &code); CloseHandle(child.hProcess);
@@ -166,7 +240,9 @@ int wmain(int argc, wchar_t** argv) {
             else if (backend == GameOverlay::OpenGL) OpenGLProbe(api == L"OpenGL2" ? 2 : api == L"OpenGL3" ? 3 : 0);
             else Require(VulkanOverlayProbe(window, dll.parent_path(), expectOverlay), "Vulkan overlay rendering");
         };
-        draw();
+        expectOverlay = false; draw();
+        Require(host.Status().ready && !host.Status().active && host.Status().frames == 0, "Renderer drew before desktop overlay was hidden");
+        host.SetDesktopVisible(false); expectOverlay = true; draw();
         const auto status = host.Status();
         std::cout << "backend=" << backend << " frames=" << status.frames << " active=" << status.active << " extent=" << status.width << 'x' << status.height << '\n';
         Require(status.active && status.backend == backend && status.frames > 0, "Native module did not report drawing");

@@ -45,6 +45,22 @@ const Frame* ReadFrame(uint32_t backend) {
     ReleaseMutex(r.mutex);
     return active ? &r.frame : nullptr;
 }
+bool BeginDraw(const Frame& frame, uint32_t backend) {
+    auto& r = State(); if (!r.shared) return false;
+    const DWORD locked = WaitForSingleObject(r.mutex, 0);
+    if (locked != WAIT_OBJECT_0 && locked != WAIT_ABANDONED) return false;
+    const bool current = r.shared->ownerPid == frame.header.ownerPid && r.shared->targetPid == GetCurrentProcessId() &&
+        r.shared->enabled && r.shared->visible && (r.shared->backendMask & backend);
+    if (current) {
+        // Called only after this backend has a valid device and renderer.
+        InterlockedExchange(&r.shared->readyPid, static_cast<LONG>(GetCurrentProcessId()));
+        InterlockedExchange(&r.shared->readyBackend, static_cast<LONG>(backend));
+        InterlockedExchange(&r.shared->drawError, 0);
+        InterlockedIncrement(&r.shared->readyCount);
+    }
+    const bool allowed = current && frame.header.drawAllowed && r.shared->drawAllowed;
+    ReleaseMutex(r.mutex); return allowed;
+}
 void ReportDraw(uint32_t backend, uint32_t width, uint32_t height) {
     auto& r = State(); if (!r.shared) return;
     InterlockedExchange(&r.shared->drawPid, static_cast<LONG>(GetCurrentProcessId()));

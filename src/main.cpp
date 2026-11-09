@@ -11,6 +11,7 @@
 #include "pump_display.h"
 #include "overlay_zorder.h"
 #include "game_overlay_host.h"
+#include "game_overlay_applications.h"
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
@@ -214,7 +215,7 @@ int WriteDiagnostics(const wchar_t* path) {
     if (!file) return 2;
     CpuSampler sampler;
     sampler.Prime();
-    file << "{\n  \"version\": \"1.12.0.0\",\n  \"elevated\": " << (IsElevated() ? "true" : "false")
+    file << "{\n  \"version\": \"1.12.2.0\",\n  \"elevated\": " << (IsElevated() ? "true" : "false")
          << ",\n  \"sample_interval_ms\": 1000,\n  \"samples\": [\n";
     bool valid = true;
     for (int i = 0; i < 4; ++i) {
@@ -406,7 +407,7 @@ private:
         // Non-visible controller title exposes read-only integration diagnostics.
         const auto status = pump_.Snapshot();
         std::wostringstream text;
-        text << L"CpuOverlay 1.12.0.0 | overlay=" << (visible_ ? L"visible" : L"hidden")
+        text << L"CpuOverlay 1.12.2.0 | overlay=" << (visible_ ? L"visible" : L"hidden")
              << L" | pump=" << (!settings_.pumpEnabled ? L"disabled" : !status.active ? L"paused" : status.connected ? L"connected" : L"disconnected")
              << L" | sent=" << status.sent << L" | temperature=";
         if (status.temperatureC) text << *status.temperatureC; else text << L"--";
@@ -452,9 +453,8 @@ private:
                 Notify(L"悬浮窗显示失败", L"无法更新透明窗口，请退出后重新启动程序。");
                 return;
             }
-            if (positioning_ || !game_.Status().active)
-                SetWindowPos(overlay_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-        } else ShowWindow(overlay_, SW_HIDE);
+            UpdateGameOverlay();
+        } else { game_.SetDesktopVisible(true); ShowWindow(overlay_, SW_HIDE); }
         UpdateTooltip();
     }
 
@@ -508,18 +508,37 @@ private:
     }
 
     void UpdateGameOverlay() {
+        const HWND foregroundWindow = GetForegroundWindow();
         DWORD foreground = 0;
-        GetWindowThreadProcessId(GetForegroundWindow(), &foreground);
+        GetWindowThreadProcessId(foregroundWindow, &foreground);
         const auto frames = Latest().frameRate;
         bool hasFrames = frames.processId == foreground && frames.fps.has_value() && settings_.visibleMetrics != 0;
         const auto monitors = ListMonitors();
         auto display = std::find_if(monitors.begin(), monitors.end(), [this](const auto& m) { return settings_.monitor == m.info.szDevice; });
         if (display == monitors.end()) display = std::find_if(monitors.begin(), monitors.end(), [](const auto& m) { return (m.info.dwFlags & MONITORINFOF_PRIMARY) != 0; });
-        if (display != monitors.end() && MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTONEAREST) != display->handle) hasFrames = false;
-        game_.Tick(foreground, hasFrames && !positioning_, visible_ && !suspended_ && nativePublished_);
-        const bool gameVisible = !positioning_ && game_.Status().active;
-        if (visible_ && gameVisible && IsWindowVisible(overlay_)) ShowWindow(overlay_, SW_HIDE);
-        else if (visible_ && !gameVisible && !IsWindowVisible(overlay_)) {
+        const auto application = GameOverlay::ApplicationName(foreground);
+        bool allowInternal = !positioning_ && settings_.visibleMetrics != 0 &&
+            !GameOverlay::ContainsApplication(settings_.gameOverlayExcludedApps, application);
+        if (display != monitors.end() && MonitorFromWindow(foregroundWindow, MONITOR_DEFAULTTONEAREST) != display->handle) allowInternal = false;
+        game_.Tick(foreground, hasFrames, visible_ && !suspended_ && nativePublished_, allowInternal);
+        const auto status = game_.Status();
+        const bool gameVisible = !positioning_ && (status.ready || status.active);
+        if (visible_ && gameVisible) {
+            // Hide first, then grant the in-process renderer permission to draw.
+            if (IsWindowVisible(overlay_)) ShowWindow(overlay_, SW_HIDE);
+            game_.SetDesktopVisible(false);
+            internalWindow_ = foregroundWindow;
+            if (status.active && application != rememberedApplication_) {
+                GameOverlay::RememberApplication(application); rememberedApplication_ = application;
+            }
+        } else {
+            // Revoke drawing before bringing the desktop overlay back.
+            game_.SetDesktopVisible(true);
+            if (internalWindow_ && IsWindow(internalWindow_))
+                RedrawWindow(internalWindow_, nullptr, nullptr, RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN);
+            internalWindow_ = nullptr;
+        }
+        if (visible_ && !gameVisible && !IsWindowVisible(overlay_)) {
             Render();
             SetWindowPos(overlay_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
         }
@@ -582,7 +601,7 @@ private:
         shortcut_->Commit(); settings_ = candidate; preview_.reset(); StopPositioning();
         game_.Configure(settings_.gameOverlayEnabled, settings_.gameOverlayBackends);
         if (runtimeChanged) ConfigureRuntimeSettings();
-        if (visible_) Render(); UpdateTooltip();
+        if (visible_) Render(); UpdateGameOverlay(); UpdateTooltip();
         return true;
     }
 
@@ -675,7 +694,7 @@ private:
             if (status != ERROR_SUCCESS) ShowError(L"无法修改开机自启设置。", status);
         } else if (selected == RetryHotkey) RegisterShortcut();
         else if (selected == About) {
-            const std::wstring help = L"CpuOverlay 1.12.0.0\n\n" + ShortcutText(settings_) +
+            const std::wstring help = L"CpuOverlay 1.12.2.0\n\n" + ShortcutText(settings_) +
                 L"：显示 / 隐藏；单击托盘图标也可切换。\n"
                 L"右键托盘 → 设置：快捷键、横/纵排列、自定义坐标及拖动定位。\n"
                 L"可调整字体、字号、粗细、颜色、不透明度、间距和描边。\n"
@@ -700,7 +719,7 @@ private:
                 L"各核心频率可能不同，读数可能与任务管理器不同。\n"
                 L"内置游戏显示：D3D11 / D3D12 / OpenGL / Vulkan，支持 64 位游戏。\n"
                 L"Vulkan 游戏请在本程序之后启动；各游戏兼容性仍需实测。\n"
-                L"窗口化、无边框和独占全屏由游戏模块绘制；接入失败时保留桌面显示。\n\n"
+                L"桌面与应用内显示互斥；在“应用排除”中勾选的程序继续使用桌面显示。\n\n"
                 L"硬件传感器需要已安装 PawnIO 及管理员权限。\n"
                 L"登录自启使用当前用户的最高权限计划任务；可在托盘中取消。\n"
                 L"删除程序前请先取消自启并退出。";
@@ -803,6 +822,8 @@ private:
     PumpDisplay pump_;
     NativeGameOverlay game_;
     bool nativePublished_ = false;
+    std::wstring rememberedApplication_;
+    HWND internalWindow_ = nullptr;
 };
 }
 

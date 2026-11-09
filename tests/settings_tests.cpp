@@ -1,11 +1,13 @@
 #include "overlay_settings.h"
 #include "overlay_renderer.h"
 #include "settings_dialog.h"
+#include "game_overlay_applications.h"
 #include "../resources/settings_ids.h"
 #include <iostream>
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
+#include <commctrl.h>
 
 namespace {
 unsigned checks = 0, failures = 0;
@@ -67,6 +69,14 @@ HWND NamesEditor() {
     }, reinterpret_cast<LPARAM>(&result));
     return result;
 }
+HWND AppsEditor() {
+    HWND result = nullptr;
+    EnumThreadWindows(GetCurrentThreadId(), [](HWND window, LPARAM data) -> BOOL {
+        if (!GetDlgItem(window, IDC_APP_LIST)) return TRUE;
+        *reinterpret_cast<HWND*>(data) = window; return FALSE;
+    }, reinterpret_cast<LPARAM>(&result));
+    return result;
+}
 void CaptureTestWindow(HWND window, const std::filesystem::path& path) {
     if (path.empty()) return;
     RECT rect{}; GetWindowRect(window, &rect);
@@ -86,6 +96,22 @@ void CALLBACK NamesUiTimer(HWND window, UINT, UINT_PTR timer, DWORD) {
         KillTimer(window, timer); PostMessageW(window, WM_CLOSE, 0, 0); return;
     }
     if (!test.stage) {
+        if (test.action >= 3) {
+            const auto editor = AppsEditor(); if (!editor) return;
+            const HWND list = GetDlgItem(editor, IDC_APP_LIST); bool found = false;
+            for (int i = 0; i < ListView_GetItemCount(list); ++i) {
+                wchar_t name[MAX_PATH]{}; ListView_GetItemText(list, i, 0, name, ARRAYSIZE(name));
+                if (_wcsicmp(name, L"Weixin.exe") != 0) continue;
+                found = true; Check(ListView_GetCheckState(list, i) != FALSE, "excluded running/recent applications open checked");
+                ListView_SetCheckState(list, i, FALSE);
+            }
+            test.editorLimits = found;
+            if (!test.capture.empty()) {
+                RedrawWindow(editor, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+                CaptureTestWindow(editor, test.capture.parent_path() / L"application-exclusions.png");
+            }
+            test.stage = 1; SendMessageW(editor, WM_COMMAND, test.action == 4 ? IDCANCEL : IDOK, 0); return;
+        }
         const auto editor = NamesEditor();
         if (!editor) return;
         for (unsigned i = 0; i < OverlayMetric::Count; ++i) {
@@ -115,6 +141,7 @@ void TestNamesDialog(int action, bool cancelMain, const std::filesystem::path& c
     NamesUiTest test;
     test.action = action; test.cancelMain = cancelMain; test.capture = capture;
     test.original.metricLabels[0] = L"原始 CPU"; test.original.valueGap = 7; test.original.pumpEnabled = true;
+    test.original.gameOverlayExcludedApps = {L"Weixin.exe"};
     test.key = L"Software\\sixunited\\CpuOverlay.NamesUiTests." + std::to_wstring(GetCurrentProcessId()) +
         L"." + std::to_wstring(action) + (cancelMain ? L".cancel" : L".apply");
     SaveOverlaySettings(test.original, test.key.c_str());
@@ -125,7 +152,7 @@ void TestNamesDialog(int action, bool cancelMain, const std::filesystem::path& c
         for (unsigned i = 0; i < 4; ++i) Check(IsDlgButtonChecked(window, IDC_GAME_D3D11 + i) == BST_CHECKED, "all four backend controls initialize");
         SetPropW(window, L"CpuOverlay.NamesTest", reinterpret_cast<HANDLE>(&test));
         SetTimer(window, 42, 20, NamesUiTimer);
-        PostMessageW(window, WM_COMMAND, IDC_EDIT_NAMES, 0);
+        PostMessageW(window, WM_COMMAND, test.action >= 3 ? IDC_GAME_APPS : IDC_EDIT_NAMES, 0);
     };
     callbacks.preview = [&test](const OverlaySettings& value) { test.previewed = true; test.preview = value; };
     callbacks.apply = [&test](const OverlaySettings& value, std::wstring&) {
@@ -133,7 +160,7 @@ void TestNamesDialog(int action, bool cancelMain, const std::filesystem::path& c
         return SaveOverlaySettings(value, test.key.c_str()) == ERROR_SUCCESS;
     };
     ShowSettingsDialog(nullptr, GetModuleHandleW(nullptr), test.original, callbacks);
-    auto expected = action == 1 ? test.original.metricLabels : OverlayMetric::DefaultLabels();
+    auto expected = action == 1 || action >= 3 ? test.original.metricLabels : OverlayMetric::DefaultLabels();
     if (!action) for (unsigned i = 0; i < OverlayMetric::Count; ++i) expected[i] = L"传感器 " + std::to_wstring(i);
     Check(test.complete && test.editorLimits, "all fifteen name editors open with the intended input limit");
     Check(test.previewed && test.preview.metricLabels == expected, "accept, cancel and reset flow into the desktop preview correctly");
@@ -141,6 +168,8 @@ void TestNamesDialog(int action, bool cancelMain, const std::filesystem::path& c
     Check(test.applied == (cancelMain ? 0 : 1) && persisted.metricLabels == (cancelMain ? test.original.metricLabels : expected),
         "only applying the main settings dialog persists changed names");
     Check(persisted.valueGap == 7 && persisted.pumpEnabled, "renaming and resetting names preserve unrelated settings");
+    const std::vector<std::wstring> expectedApps = action == 3 && !cancelMain ? std::vector<std::wstring>{} : test.original.gameOverlayExcludedApps;
+    Check(persisted.gameOverlayExcludedApps == expectedApps, "application exclusions honor child confirmation, child cancel and main cancel");
     RegDeleteTreeW(HKEY_CURRENT_USER, test.key.c_str());
 }
 }
@@ -229,6 +258,7 @@ int wmain(int argc, wchar_t** argv) {
         s.gap = 12; s.opacity = 70; s.margin = 22;
         s.valueGap = 17; s.pumpEnabled = true; s.refreshIntervalMs = 750;
         s.gameOverlayEnabled = false; s.gameOverlayBackends = 9;
+        s.gameOverlayExcludedApps = {L"Weixin.exe", L"WeChat.exe", L"Nioh2.exe"};
         s.hotkeyModifiers = MOD_CONTROL | MOD_SHIFT; s.hotkeyKey = VK_F9; s.monitor = L"\\\\.\\DISPLAY2";
         s.visibleMetrics = OverlayMetric::Temperature | OverlayMetric::Keyboard | OverlayMetric::Mouse;
         s.metricLabels[0] = std::wstring(32, L'C'); s.metricLabels[2] = L"核心温度"; s.metricLabels[7] = L"Mouse Battery";
@@ -239,6 +269,13 @@ int wmain(int argc, wchar_t** argv) {
         Check(loaded.metricOrder == s.metricOrder, "custom display order survives reload");
         Check(loaded.metricLabels == s.metricLabels, "per-metric Chinese and English keys survive reload");
         Check(!loaded.gameOverlayEnabled && loaded.gameOverlayBackends == 9, "native backend selection survives atomic save/reload");
+        Check(loaded.gameOverlayExcludedApps == s.gameOverlayExcludedApps &&
+            GameOverlay::ContainsApplication(loaded.gameOverlayExcludedApps, L"WEIXIN.EXE") &&
+            !GameOverlay::ContainsApplication(loaded.gameOverlayExcludedApps, L"eldenring.exe"), "per-application exclusions persist and match without case sensitivity");
+        auto invalidApps = loaded; invalidApps.gameOverlayExcludedApps.push_back(L"weixin.exe");
+        Check(SaveOverlaySettings(invalidApps, key.c_str()) == ERROR_INVALID_DATA, "duplicate executable exclusions preserve valid settings");
+        invalidApps = loaded; invalidApps.gameOverlayExcludedApps = {L"C:\\Apps\\Weixin.exe"};
+        Check(SaveOverlaySettings(invalidApps, key.c_str()) == ERROR_INVALID_DATA, "exclusions accept executable names rather than ambiguous full paths");
         Check(loaded.valueGap == 17 && loaded.pumpEnabled && loaded.refreshIntervalMs == 750,
             "label/value spacing, optional pump and refresh interval survive reload");
         Check(loaded.font == s.font && loaded.fontPoints == 33 && !loaded.bold && loaded.italic && loaded.color == s.color &&
@@ -250,7 +287,7 @@ int wmain(int argc, wchar_t** argv) {
         HKEY testKey = nullptr;
         RegOpenKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, KEY_SET_VALUE | KEY_QUERY_VALUE, &testKey);
         DWORD size = 0;
-        RegQueryValueExW(testKey, L"DisplaySettingsV8", nullptr, nullptr, nullptr, &size);
+        RegQueryValueExW(testKey, L"DisplaySettingsV9", nullptr, nullptr, nullptr, &size);
         // Frozen fixture offsets describe the historical on-disk formats.
         constexpr DWORD v1Bytes = 196, v5Bytes = 272, v6Bytes = 340, visibleOffset = 196, orderOffset = 200;
         if (size <= v6Bytes) {
@@ -259,8 +296,9 @@ int wmain(int argc, wchar_t** argv) {
             return 1;
         }
         std::vector<BYTE> profile(size);
-        RegQueryValueExW(testKey, L"DisplaySettingsV8", nullptr, nullptr, profile.data(), &size);
-        const auto savedProfileV8 = profile;
+        RegQueryValueExW(testKey, L"DisplaySettingsV9", nullptr, nullptr, profile.data(), &size);
+        const auto savedProfileV9 = profile;
+        auto savedProfileV8 = profile; savedProfileV8.resize(1272);
         auto write = [testKey](const wchar_t* name, const std::vector<BYTE>& bytes) {
             return RegSetValueExW(testKey, name, 0, REG_BINARY, bytes.data(), static_cast<DWORD>(bytes.size()));
         };
@@ -271,6 +309,11 @@ int wmain(int argc, wchar_t** argv) {
         auto visible = [](std::vector<BYTE>& bytes, DWORD value) {
             std::memcpy(bytes.data() + visibleOffset, &value, sizeof(value));
         };
+        header(savedProfileV8, 8); write(L"DisplaySettingsV8", savedProfileV8); RegDeleteValueW(testKey, L"DisplaySettingsV9");
+        const auto migratedV8 = LoadOverlaySettings(key.c_str());
+        Check(migratedV8.gameOverlayExcludedApps.empty() && !migratedV8.gameOverlayEnabled && migratedV8.gameOverlayBackends == 9 &&
+            migratedV8.metricLabels == loaded.metricLabels, "V8 migration preserves display preferences and starts with an empty exclusion list");
+        RegDeleteValueW(testKey, L"DisplaySettingsV8");
         const std::vector<BYTE> savedLegacyPrefix(profile.begin(), profile.begin() + v5Bytes);
         auto version7 = savedProfileV8; version7.resize(version7.size() - 2 * sizeof(DWORD)); header(version7, 7);
         write(L"DisplaySettingsV7", version7); RegDeleteValueW(testKey, L"DisplaySettingsV8");
@@ -333,27 +376,32 @@ int wmain(int argc, wchar_t** argv) {
         Check(SaveOverlaySettings(s, key.c_str()) == ERROR_INVALID_DATA &&
             LoadOverlaySettings(key.c_str()).metricLabels[7] == L"鼠标电量", "invalid label saves preserve the last valid configuration");
         const DWORD duplicate = 13;
-        auto corruptProfile = savedProfileV8;
+        auto corruptProfile = savedProfileV9;
         std::memcpy(corruptProfile.data() + orderOffset + sizeof(DWORD), &duplicate, sizeof(duplicate));
-        write(L"DisplaySettingsV8", corruptProfile);
+        write(L"DisplaySettingsV9", corruptProfile);
         Check(LoadOverlaySettings(key.c_str()).metricOrder == OverlayMetric::DefaultOrder(), "corrupt V8 order falls back safely");
-        corruptProfile = savedProfileV8;
+        corruptProfile = savedProfileV9;
         const DWORD invalidPump = 2;
         std::memcpy(corruptProfile.data() + v5Bytes - 2 * sizeof(DWORD), &invalidPump, sizeof(invalidPump));
-        write(L"DisplaySettingsV8", corruptProfile);
+        write(L"DisplaySettingsV9", corruptProfile);
         Check(!LoadOverlaySettings(key.c_str()).pumpEnabled, "invalid pump flag never enables hardware access");
-        corruptProfile = savedProfileV8;
+        corruptProfile = savedProfileV9;
         std::array<wchar_t, 33> unterminated; unterminated.fill(L'A');
         std::memcpy(corruptProfile.data() + v5Bytes, unterminated.data(), sizeof(unterminated));
-        write(L"DisplaySettingsV8", corruptProfile);
+        write(L"DisplaySettingsV9", corruptProfile);
         Check(LoadOverlaySettings(key.c_str()).metricLabels == OverlayMetric::DefaultLabels(), "unterminated labels safely fall back");
-        corruptProfile = savedProfileV8;
+        corruptProfile = savedProfileV9;
         const wchar_t newline = L'\n';
         std::memcpy(corruptProfile.data() + v5Bytes, &newline, sizeof(newline));
-        write(L"DisplaySettingsV8", corruptProfile);
+        write(L"DisplaySettingsV9", corruptProfile);
         Check(LoadOverlaySettings(key.c_str()).metricLabels == OverlayMetric::DefaultLabels(), "persisted control characters are rejected");
+        corruptProfile = savedProfileV9;
+        const DWORD invalidAppCount = 65;
+        std::memcpy(corruptProfile.data() + 1272, &invalidAppCount, sizeof(invalidAppCount));
+        write(L"DisplaySettingsV9", corruptProfile);
+        Check(LoadOverlaySettings(key.c_str()).gameOverlayExcludedApps.empty(), "oversized persisted application count rejects the corrupt profile");
         const DWORD junk = 0xffffffff;
-        RegSetValueExW(testKey, L"DisplaySettingsV8", 0, REG_BINARY, reinterpret_cast<const BYTE*>(&junk), sizeof(junk));
+        RegSetValueExW(testKey, L"DisplaySettingsV9", 0, REG_BINARY, reinterpret_cast<const BYTE*>(&junk), sizeof(junk));
         Check(LoadOverlaySettings(key.c_str()).fontPoints == 33 && LoadOverlaySettings(key.c_str()).visibleMetrics == OverlayMetric::All, "damaged V8 uses intact legacy profile");
         RegDeleteValueW(testKey, L"DisplaySettingsV1"); RegCloseKey(testKey);
         Check(LoadOverlaySettings(key.c_str()).fontPoints == 18, "corrupt settings safely fall back");
@@ -536,6 +584,9 @@ int wmain(int argc, wchar_t** argv) {
         TestNamesDialog(1, false);
         TestNamesDialog(2, false);
         TestNamesDialog(0, true);
+        TestNamesDialog(3, false, capture);
+        TestNamesDialog(4, false);
+        TestNamesDialog(3, true);
     }
     Gdiplus::GdiplusShutdown(token);
     std::cout << checks << " checks, " << failures << " failures\n";

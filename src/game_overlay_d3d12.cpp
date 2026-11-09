@@ -183,6 +183,7 @@ bool DrawD3D12(void* pointer) {
         r = std::make_unique<Renderer>(); const HRESULT hr = r->Init(sc.Get(), device.Get(), queue);
         if (FAILED(hr)) { ReportError(D3D12, hr); r.reset(); return false; }
     }
+    if (!BeginDraw(*f, D3D12)) return true;
     const UINT index = sc->GetCurrentBackBufferIndex(); if (index >= r->frames.size()) return false;
     auto& frame = r->frames[index];
     ComPtr<ID3D12Resource> backBuffer;

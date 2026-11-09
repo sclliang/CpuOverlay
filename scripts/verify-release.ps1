@@ -16,8 +16,8 @@ $fields = @{
     CompanyName = 'sixunited'
     ProductName = 'CpuOverlay'
     FileDescription = 'System Performance, Battery and Cooling Display Monitor'
-    FileVersion = '1.12.0.0'
-    ProductVersion = '1.12.0.0'
+    FileVersion = '1.12.2.0'
+    ProductVersion = '1.12.2.0'
     OriginalFilename = 'CpuOverlay.exe'
     InternalName = 'CpuOverlay'
     LegalCopyright = 'Copyright (c) 2026 sixunited. Author: sclliang'
@@ -244,16 +244,18 @@ $setupDlls = @($setupImports | ForEach-Object { if ($_ -match '^\s+([A-Za-z0-9_.
 foreach ($dll in $setupDlls) { Assert-Condition ($dll -in $systemDlls) "Unexpected installer dependency: $dll" }
 
 $nativeDirectory = Join-Path (Split-Path $exePath) 'bin\game'
-$nativeDll = Join-Path $nativeDirectory 'CpuOverlayGame64.dll'
+$nativeName = "CpuOverlayGame64-$($fields.FileVersion).dll"
+$nativeDll = Join-Path $nativeDirectory $nativeName
 $nativeVersion = (Get-Item -LiteralPath $nativeDll).VersionInfo
 foreach ($field in @('CompanyName','ProductName','FileVersion','ProductVersion','LegalCopyright')) {
     Assert-Condition ($nativeVersion.$field -eq $fields[$field]) "Incorrect native module VERSIONINFO: $field"
 }
-Assert-Condition ($nativeVersion.OriginalFilename -eq 'CpuOverlayGame64.dll') 'Native module original filename mismatch.'
+Assert-Condition ($nativeVersion.OriginalFilename -eq $nativeName) 'Native module original filename mismatch.'
+Assert-Condition ((Get-Content -LiteralPath (Join-Path $nativeDirectory 'CpuOverlayGame64.json') -Raw | ConvertFrom-Json).layer.library_path -eq $nativeName) 'Vulkan manifest does not target the current versioned module.'
 Assert-Condition ([InstallerPayload]::Author($nativeDll) -eq 'sclliang') 'Native module author metadata mismatch.'
 Assert-Condition ([InstallerPayload]::LanguageId($nativeDll) -eq 0x0409) 'Native module resource language mismatch.'
 foreach ($payload in @(
-    @{Name='CpuOverlayGame64.dll';Id=122}, @{Name='CpuOverlayGame64.json';Id=123},
+    @{Name=$nativeName;Id=122}, @{Name='CpuOverlayGame64.json';Id=123},
     @{Name='LICENSE-MinHook.txt';Id=124}, @{Name='LICENSE-imgui.txt';Id=125}, @{Name='LICENSE-Vulkan-Headers.txt';Id=126})) {
     Assert-Condition ([InstallerPayload]::Hash($setupPath, $payload.Id) -eq (Get-FileHash -LiteralPath (Join-Path $nativeDirectory $payload.Name)).Hash) 'Native overlay installer payload mismatch.'
 }

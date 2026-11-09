@@ -1,5 +1,7 @@
 #include <windows.h>
 #include "../src/game_overlay_registration.h"
+#include "../src/game_overlay_deployment.h"
+#include "app_version.h"
 #include <commctrl.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -19,7 +21,7 @@ constexpr wchar_t kUninstallKey[] = L"Software\\Microsoft\\Windows\\CurrentVersi
 constexpr wchar_t kSettingsKey[] = L"Software\\sixunited\\CpuOverlay";
 constexpr wchar_t kControllerClass[] = L"sixunited.CpuOverlay.Controller.1";
 struct Options { fs::path target, report; bool silent = false, uninstall = false, launch = true, startup = true; };
-struct Outcome { bool success = false, pawnPresent = false, pawnInstalled = false; std::wstring error; };
+struct Outcome { bool success = false, pawnPresent = false, pawnInstalled = false; std::wstring error; size_t retainedModules = 0; };
 struct Failure { std::wstring message; };
 
 std::wstring ErrorText(DWORD code) {
@@ -120,6 +122,10 @@ void Extract(int id, const fs::path& destination) {
     const void* data = memory ? LockResource(memory) : nullptr;
     Require(data && bytes, L"无法读取安装包资源。");
     fs::create_directories(destination.parent_path());
+    if (id == 122) {
+        const DWORD status = GameOverlayDeployment::InstallImage(destination, data, bytes);
+        Require(status == ERROR_SUCCESS, L"无法写入当前版本的内置显示模块。\n" + ErrorText(status)); return;
+    }
     std::ofstream file(destination, std::ios::binary | std::ios::trunc);
     file.write(static_cast<const char*>(data), bytes);
     file.close();
@@ -173,28 +179,18 @@ void Report(const Options& options, const Outcome& outcome) {
     if (options.uninstall && options.report.empty()) return;
     std::error_code error; fs::create_directories(path.parent_path(), error);
     std::ofstream file(path);
-    file << "{\n  \"version\": \"1.11.0.0\",\n  \"success\": " << (outcome.success ? "true" : "false")
+    file << "{\n  \"version\": \"" CPUOVERLAY_VERSION_TEXT "\",\n  \"success\": " << (outcome.success ? "true" : "false")
         << ",\n  \"target\": \"" << Json(options.target.wstring()) << "\",\n  \"pawnio_was_present\": " << (outcome.pawnPresent ? "true" : "false")
         << ",\n  \"pawnio_installed_now\": " << (outcome.pawnInstalled ? "true" : "false")
+        << ",\n  \"retained_game_modules\": " << outcome.retainedModules
         << ",\n  \"error\": \"" << Json(outcome.error) << "\"\n}\n";
 }
 
-void CheckGameModuleWritable(const fs::path& target) {
-    const auto module = target / L"bin" / L"game" / L"CpuOverlayGame64.dll";
-    HANDLE file = CreateFileW(module.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
-        const auto error = GetLastError();
-        Require(error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND,
-            L"无法更新内置游戏显示模块，请关闭正在使用 CpuOverlay 的游戏后重试。\n" + ErrorText(error));
-    } else CloseHandle(file);
-}
 void Uninstall(const Options& options) {
     const auto installed = ReadRegistry(HKEY_CURRENT_USER, kUninstallKey, L"InstallLocation");
     Require(!installed.empty() && _wcsicmp(fs::weakly_canonical(installed).c_str(), fs::weakly_canonical(options.target).c_str()) == 0,
         L"卸载路径与已登记的安装位置不一致，已停止操作。");
     StopOverlay();
-    CheckGameModuleWritable(options.target);
     ConfigureGameOverlayLayer(options.target / L"bin" / L"game" / L"CpuOverlayGame64.json", false);
     const auto main = options.target / L"CpuOverlay.exe";
     if (fs::exists(main)) { Require(IsCpuOverlay(main), L"目标文件不属于 CpuOverlay。"); Require(Run(main, L"--disable-startup") == 0, L"移除登录自启失败。"); }
@@ -206,12 +202,13 @@ void Uninstall(const Options& options) {
         L"bin\\gpu\\LhmCpuSensorBridge.dll", L"bin\\gpu\\LICENSE-MPL-2.0", L"bin\\gpu\\LICENSE-PawnIO-Modules-LGPL-2.1",
         L"bin\\gpu\\README.md", L"bin\\presentmon\\LICENSE.txt", L"bin\\presentmon\\README.md",
         L"bin\\voltide\\LICENSE.txt", L"bin\\voltide\\README.md",
-        L"bin\\game\\CpuOverlayGame64.dll", L"bin\\game\\CpuOverlayGame64.json", L"bin\\game\\LICENSE-MinHook.txt",
+        L"bin\\game\\CpuOverlayGame64.json", L"bin\\game\\LICENSE-MinHook.txt",
         L"bin\\game\\LICENSE-imgui.txt", L"bin\\game\\LICENSE-Vulkan-Headers.txt"};
     for (const auto relative : files) {
         const auto path = options.target / relative;
         Require(DeleteFileW(path.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND, L"无法删除程序文件：" + path.wstring());
     }
+    GameOverlayDeployment::RetireModules(options.target / L"bin" / L"game", L"", true);
     DeleteFileW((KnownFolder(FOLDERID_Programs) / L"CpuOverlay.lnk").c_str());
     RegDeleteTreeW(HKEY_CURRENT_USER, kUninstallKey);
     HKEY settings = nullptr;
@@ -257,7 +254,6 @@ Outcome Perform(const Options& options, HWND progress) {
         const auto main = options.target / L"CpuOverlay.exe";
         if (fs::exists(main)) Require(IsCpuOverlay(main), L"目标位置存在同名的其他程序，无法覆盖。");
         StopOverlay();
-        CheckGameModuleWritable(options.target);
         fs::create_directories(options.target / L"bin" / L"backup");
         if (fs::exists(main))
             Require(CopyFileW(main.c_str(), (options.target / L"bin" / L"backup" / L"CpuOverlay-previous.exe").c_str(), FALSE) != FALSE, L"无法备份原程序。");
@@ -281,18 +277,19 @@ Outcome Perform(const Options& options, HWND progress) {
         Extract(119, options.target / L"bin" / L"presentmon" / L"README.md");
         Extract(120, options.target / L"bin" / L"voltide" / L"LICENSE.txt");
         Extract(121, options.target / L"bin" / L"voltide" / L"README.md");
-        Extract(122, options.target / L"bin" / L"game" / L"CpuOverlayGame64.dll");
+        Extract(122, options.target / L"bin" / L"game" / CPUOVERLAY_GAME_MODULE_WNAME);
         Extract(123, options.target / L"bin" / L"game" / L"CpuOverlayGame64.json");
         Extract(124, options.target / L"bin" / L"game" / L"LICENSE-MinHook.txt");
         Extract(125, options.target / L"bin" / L"game" / L"LICENSE-imgui.txt");
         Extract(126, options.target / L"bin" / L"game" / L"LICENSE-Vulkan-Headers.txt");
+        outcome.retainedModules = GameOverlayDeployment::RetireModules(options.target / L"bin" / L"game", CPUOVERLAY_GAME_MODULE_WNAME).size();
         const auto uninstall = options.target / L"bin" / L"CpuOverlay-Setup.exe";
         if (_wcsicmp(SelfPath().c_str(), uninstall.c_str()) != 0)
             Require(CopyFileW(SelfPath().c_str(), uninstall.c_str(), FALSE) != FALSE, L"无法创建卸载程序。");
         stage(75, L"正在配置快捷方式和登录自启…");
         Require(Run(main, options.startup ? L"--enable-startup" : L"--disable-startup") == 0, L"登录自启配置失败。");
         WriteRegistry(kUninstallKey, L"DisplayName", L"CpuOverlay");
-        WriteRegistry(kUninstallKey, L"DisplayVersion", L"1.11.0.0");
+        WriteRegistry(kUninstallKey, L"DisplayVersion", CPUOVERLAY_VERSION_WTEXT);
         WriteRegistry(kUninstallKey, L"Publisher", L"sixunited");
         WriteRegistry(kUninstallKey, L"InstallLocation", options.target.wstring());
         WriteRegistry(kUninstallKey, L"DisplayIcon", main.wstring());
@@ -331,7 +328,7 @@ bool Confirm(Options& options) {
         TASKDIALOGCONFIG dialog{sizeof(dialog)};
         dialog.dwFlags = TDF_SIZE_TO_CONTENT | (options.startup ? TDF_VERIFICATION_FLAG_CHECKED : 0);
         dialog.pszWindowTitle = L"CpuOverlay 安装";
-        dialog.pszMainInstruction = L"安装 CpuOverlay 1.11.0.0";
+        dialog.pszMainInstruction = L"安装 CpuOverlay " CPUOVERLAY_VERSION_WTEXT;
         dialog.pszContent = content.c_str(); dialog.pszVerificationText = L"登录 Windows 后自动运行";
         dialog.pButtons = buttons; dialog.cButtons = ARRAYSIZE(buttons); dialog.nDefaultButton = 100;
         int selected = 0; BOOL checked = FALSE;

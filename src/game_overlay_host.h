@@ -4,7 +4,7 @@
 #include <memory>
 
 struct GameOverlayStatus {
-    bool enabled = false, active = false;
+    bool enabled = false, active = false, ready = false;
     DWORD targetPid = 0, backend = 0, error = 0, layerError = 0;
     LONG frames = 0;
     LONG renderError = 0;
@@ -19,8 +19,9 @@ public:
     NativeGameOverlay& operator=(const NativeGameOverlay&) = delete;
     void Configure(bool enabled, DWORD backendMask);
     bool Publish(Gdiplus::Bitmap& bitmap, const OverlaySettings& settings, float rasterScale);
-    void Tick(DWORD foregroundPid, bool hasFrames, bool visible);
+    void Tick(DWORD foregroundPid, bool hasFrames, bool visible, bool allowInternal = true);
     void SetVisible(bool visible);
+    void SetDesktopVisible(bool visible);
     GameOverlayStatus Status() const;
 private:
     struct Impl;

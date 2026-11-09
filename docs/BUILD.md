@@ -10,7 +10,7 @@ package/
 ├── CpuOverlay.exe             # 主程序
 └── bin/
     ├── game/                  # 内置 D3D11 / D3D12 / OpenGL / Vulkan 游戏显示
-    │   ├── CpuOverlayGame64.dll
+    │   ├── CpuOverlayGame64-1.12.2.0.dll
     │   ├── CpuOverlayGame64.json
     │   └── LICENSE-*.txt
     └── pawnio/
@@ -41,7 +41,7 @@ Set-Location .\CpuOverlay
 .\build.ps1
 # 无需管理员权限或 PawnIO 的算法测试：
 cmake --build build --config Release --target CpuOverlaySensorTests CpuOverlaySettingsTests CpuOverlayBatteryTests CpuOverlayPumpTests
-cmake --build build --config Release --target CpuOverlayGpuTests CpuOverlayFrameRateTests
+cmake --build build --config Release --target CpuOverlayGpuTests CpuOverlayFrameRateTests CpuOverlayGameProbe
 cmake --build build --config Release --target CpuOverlayVendorBatteryTests
 ctest --test-dir build -C Release --output-on-failure
 # 无驱动环境下验证发布文件、依赖、绘图和操作系统指标：
@@ -62,11 +62,11 @@ Voltide 协议改写为原生 C++，其 MIT 许可证及固定来源说明随 `b
 
 验证脚本检查发布 EXE 和游戏 DLL 的版本资源、英文语言、静态运行库依赖、Intel / AMD 外置模块和内嵌模块的哈希、含游戏模块的安装器载荷、真实六项采样与原始 MSR / SMN 计算、透明黄色横排绘图，并用仅包含系统目录的 PATH、异于 EXE 的工作目录运行发布程序。`-SkipHardware` 会明确将温度 / 功耗实测标记为跳过，不代表硬件读取验证通过。
 
-自动测试覆盖传感器换算、配置读写与异常数据、DPI 和屏幕边界、横纵绘制、颜色 / 透明度，以及真实 Windows 热键注册中的冲突、取消和切换。设置测试还覆盖 15 项名称独立保存、V1–V7 配置迁移、四后端开关、中文 / 英文 / 标点名称、长名称与数值列对齐，并通过实际对话框验证改名、取消、恢复默认、预览和应用。桌面集成测试可构建 `CpuOverlayProbe` 目标，在默认顶部居中布局下使用已配置快捷键检查焦点和穿透点击。测试工具不发布。
+自动测试覆盖传感器换算、配置读写与异常数据、DPI 和屏幕边界、横纵绘制、颜色 / 透明度，以及真实 Windows 热键注册中的冲突、取消和切换。设置测试还覆盖 15 项名称独立保存、V1–V8 配置迁移、四后端开关及应用排除、中文 / 英文 / 标点名称、长名称与数值列对齐，并通过实际对话框验证改名、取消、恢复默认、预览和应用。桌面集成测试可构建 `CpuOverlayProbe` 目标，在默认顶部居中布局下使用已配置快捷键检查焦点和穿透点击。测试工具不发布。
 
 ## 程序属性
 
-产品 CpuOverlay，版本 1.12.0.0，CompanyName `sixunited`，Author `sclliang`。作者及版权仅保存在文件元数据，不在程序界面显示。
+产品 CpuOverlay，版本 1.12.2.0，CompanyName `sixunited`，Author `sclliang`。作者及版权仅保存在文件元数据，不在程序界面显示。
 
 - 主程序 FileDescription：`System Performance, Battery and Cooling Display Monitor`
 - 安装器 FileDescription：`CpuOverlay Installer with PawnIO Driver Setup`

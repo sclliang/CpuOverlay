@@ -160,6 +160,7 @@ bool DrawOpenGL(HDC dc) {
     const bool unpack = r.g.BindBuffer && (major > 2 || (major == 2 && minor >= 1));
     SavedState saved(r.g, major >= 3, samplers, unpack);
     if (!r.ready && !r.Init()) { ReportError(OpenGL, ERROR_NOT_SUPPORTED); return false; }
+    if (!BeginDraw(*f, OpenGL)) return true;
     r.Upload(*f);
     const auto rect = WindowPlacement(*f, window, client.right, client.bottom);
     const GLfloat placement[]{rect.x * 2 / client.right - 1, 1 - rect.y * 2 / client.bottom,
